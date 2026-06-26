@@ -361,11 +361,10 @@ def main():
         interval=900,   # 15 minutes
         first=90,
     )
-    # Weekly auto-retraining — keeps models fresh with latest price data
-    jq.run_repeating(
+    # Daily auto-retraining at 2:00 AM UTC — keeps models fresh
+    jq.run_daily(
         lambda ctx: asyncio.ensure_future(auto_retrain(app)),
-        interval=7 * 24 * 3600,   # every 7 days
-        first=7 * 24 * 3600,      # first run after 7 days (not on startup)
+        time=datetime.time(hour=2, minute=0),
     )
     # Daily market report at 8:00 AM UTC
     from handlers.extra_handlers import send_daily_report
