@@ -1,0 +1,340 @@
+"""
+Auto-trading engine. Runs as an APScheduler job.
+Each cycle:
+  1. Check all open positions for stop-loss / take-profit
+  2. For each watched symbol, get ML prediction + live sentiment
+  3. Execute buy/sell if confidence threshold is met
+  4. Log every action
+"""
+import asyncio
+import logging
+from typing import Callable
+
+logger = logging.getLogger(__name__)
+
+# Symbols actively being auto-traded {chat_id: set of symbols}
+_watched: dict[int, set] = {}
+# Notification callback: (chat_id, message) -> None
+_notify_cb: Callable | None = None
+
+DEFAULT_SYMBOLS = [
+    # Crypto
+    "BTC", "ETH", "SOL", "BNB", "DOGE",
+    # Forex
+    "EURUSD", "GBPUSD",
+    # Commodities
+    "GOLD", "OIL",
+    # Stocks
+    "AAPL", "TSLA", "NVDA",
+]
+
+
+def start_watching(chat_id: int, symbols: list[str]):
+    _watched[chat_id] = set(s.upper() for s in symbols)
+    from database import save_autotrade_session
+    save_autotrade_session(chat_id, _watched[chat_id])
+
+
+def stop_watching(chat_id: int):
+    _watched.pop(chat_id, None)
+    from database import delete_autotrade_session
+    delete_autotrade_session(chat_id)
+
+
+def restore_sessions():
+    """Load saved autotrade sessions from DB on bot startup.
+    If no session exists but a chat_id is known, auto-start with all default symbols."""
+    from database import load_all_autotrade_sessions, get_last_chat_id, save_autotrade_session
+
+    sessions = load_all_autotrade_sessions()
+
+    if sessions:
+        _watched.update(sessions)
+        total = sum(len(v) for v in sessions.values())
+        logger.info("Restored %d autotrade session(s) with %d symbols", len(sessions), total)
+    else:
+        # No saved session — try to auto-start with the last known user
+        chat_id = get_last_chat_id()
+        if chat_id:
+            all_syms = set(DEFAULT_SYMBOLS)
+            # Add full symbol list
+            try:
+                from handlers.ml_handlers import ALL_SYMBOLS
+                all_syms = set(ALL_SYMBOLS)
+            except Exception:
+                pass
+            _watched[chat_id] = all_syms
+            save_autotrade_session(chat_id, all_syms)
+            logger.info("Auto-started trading for chat %d with %d symbols", chat_id, len(all_syms))
+
+
+def get_watched(chat_id: int) -> set:
+    return _watched.get(chat_id, set())
+
+
+def is_watching(chat_id: int) -> bool:
+    return bool(_watched.get(chat_id))
+
+
+def set_notify_callback(cb: Callable):
+    global _notify_cb
+    _notify_cb = cb
+
+
+async def _notify(chat_id: int, message: str):
+    if _notify_cb:
+        try:
+            await _notify_cb(chat_id, message)
+        except Exception as e:
+            logger.error("Notify error: %s", e)
+
+
+def _get_price(symbol: str) -> float | None:
+    try:
+        from config import CRYPTO_IDS, COMMODITY_SYMBOLS
+        if symbol in CRYPTO_IDS:
+            from data.crypto import get_crypto_price
+            d = get_crypto_price(symbol)
+            return d["price"] if d else None
+        elif symbol in COMMODITY_SYMBOLS:
+            from data.stocks import get_commodity_price
+            d = get_commodity_price(symbol)
+            return d["price"] if d else None
+        elif len(symbol) == 6:
+            from data.forex import get_forex_price
+            d = get_forex_price(symbol)
+            return d["price"] if d else None
+        else:
+            from data.stocks import get_stock_price
+            d = get_stock_price(symbol)
+            return d["price"] if d else None
+    except Exception:
+        return None
+
+
+def _asset_type(symbol: str) -> str:
+    from config import CRYPTO_IDS, COMMODITY_SYMBOLS
+    if symbol in CRYPTO_IDS:
+        return "crypto"
+    if symbol in COMMODITY_SYMBOLS:
+        return "commodity"
+    if len(symbol) == 6:
+        return "forex"
+    return "stock"
+
+
+async def run_trading_cycle(app=None):
+    """Called by APScheduler every N minutes."""
+    from trading.demo_wallet import execute_buy, execute_sell, check_stop_take
+    from ml.trainer import predict_symbol
+    from data.sentiment import aggregate_sentiment
+    from data.crypto import get_fear_greed
+    from trading.smart_features import (daily_loss_limit_hit, check_stale_positions,
+                                        timeframe_aligned, earnings_blackout,
+                                        funding_rate_size_mult, social_volume_spike)
+    from utils.formatters import fmt_price
+
+    if not _watched:
+        return
+
+    fg_data = get_fear_greed()
+    fear_greed = fg_data["value"] if fg_data else 50
+
+    # ── Daily loss limit check ────────────────────────────────────────────────
+    loss_hit, today_pnl = daily_loss_limit_hit()
+    if loss_hit:
+        logger.warning("Daily loss limit hit (%.2f) — pausing new trades until midnight", today_pnl)
+        # Only check SL/TP on existing positions, no new entries
+        all_syms: set[str] = set()
+        for syms in _watched.values():
+            all_syms.update(syms)
+        for symbol in all_syms:
+            price = _get_price(symbol)
+            if price:
+                result = check_stop_take(symbol, price)
+                if result:
+                    msg = _format_exit_msg(result, price)
+                    for chat_id, syms in _watched.items():
+                        if symbol in syms:
+                            await _notify(chat_id, msg)
+        return
+
+    # ── Stale position cleanup ────────────────────────────────────────────────
+    stale = check_stale_positions()
+    for s in stale:
+        result = execute_sell(s["symbol"], s["price"], reason="STALE_POSITION")
+        if result:
+            msg = (f"⏰ *Stale Position Closed: {s['symbol']}*\n\n"
+                   f"{s['reason']}\n"
+                   f"P&L: {result['pnl']:+.2f} ({result['pnl_pct']:+.2f}%)\n"
+                   f"Cash freed up for better opportunities.")
+            for chat_id, syms in _watched.items():
+                if s["symbol"] in syms:
+                    await _notify(chat_id, msg)
+
+    # Collect all symbols being watched across all users
+    all_symbols: set[str] = set()
+    for syms in _watched.values():
+        all_symbols.update(syms)
+
+    for symbol in all_symbols:
+        price = _get_price(symbol)
+        if price is None:
+            continue
+
+        # 1. Check stop-loss / take-profit / trailing stop
+        result = check_stop_take(symbol, price)
+        if result:
+            msg = _format_exit_msg(result, price)
+            for chat_id, syms in _watched.items():
+                if symbol in syms:
+                    await _notify(chat_id, msg)
+            continue
+
+        # 2. Get sentiment + ML prediction
+        try:
+            sentiment_result = aggregate_sentiment(symbol, log_to_db=True)
+            sentiment_score = sentiment_result.composite
+        except Exception:
+            sentiment_score = 0.0
+
+        try:
+            pred = predict_symbol(symbol, sentiment_score, fear_greed)
+        except Exception as e:
+            logger.error("Prediction error %s: %s", symbol, e)
+            continue
+
+        if "error" in pred:
+            continue
+
+        # Block stablecoins
+        from config import STABLECOIN_SYMBOLS
+        if symbol in STABLECOIN_SYMBOLS:
+            continue
+
+        # Block unreliable models
+        from database import get_model_meta, get_position
+        meta = get_model_meta(symbol)
+        if meta:
+            meta = dict(meta)
+            n   = meta.get("n_samples", 0) or 0
+            acc = meta.get("accuracy", 0) or 0
+            rec = meta.get("recall_s", 0) or 0
+            if (acc > 0.75 and n < 200) or (rec < 0.10 and acc > 0.75):
+                logger.info("Skipping %s — overfit model", symbol)
+                continue
+
+        signal     = pred["signal"]
+        confidence = pred["confidence"]
+        asset_type = _asset_type(symbol)
+
+        # 3. Smart position review for EXISTING positions
+        #    Re-evaluates: should we exit early or tighten the stop?
+        if get_position(symbol):
+            from trading.demo_wallet import smart_position_review
+            smart_result = smart_position_review(symbol, price, sentiment_score, fear_greed)
+            if smart_result:
+                msg = _format_exit_msg(smart_result, price)
+                for chat_id, syms in _watched.items():
+                    if symbol in syms:
+                        await _notify(chat_id, msg)
+            continue  # Don't try to re-buy while holding
+
+        # 4. Open new position — run extra smart checks first
+        if signal == "BUY" and confidence >= 0.60:
+
+            # Earnings blackout for stocks
+            blacked_out, earn_reason = earnings_blackout(symbol)
+            if blacked_out:
+                logger.info("Skipping %s — %s", symbol, earn_reason)
+                continue
+
+            # Multi-timeframe: 4H must agree with daily signal
+            tf_ok, tf_reason = timeframe_aligned(symbol, signal)
+            if not tf_ok:
+                logger.info("Skipping %s — %s", symbol, tf_reason)
+                continue
+
+            # Social volume spike warning (don't block, but log)
+            spike, spike_msg = social_volume_spike(symbol)
+            if spike:
+                logger.info("%s social spike: %s", symbol, spike_msg)
+
+            # Funding rate size adjustment for crypto
+            fund_mult = funding_rate_size_mult(symbol, signal)
+
+            trade = execute_buy(symbol, asset_type, price, confidence, signal,
+                                sentiment=sentiment_score * fund_mult)
+            if trade:
+                msg = _format_buy_msg(trade, pred)
+                if spike:
+                    msg += f"\n⚡ Social spike: {spike_msg}"
+                for chat_id, syms in _watched.items():
+                    if symbol in syms:
+                        await _notify(chat_id, msg)
+
+        elif signal == "SELL":
+            pos = get_position(symbol)
+            if pos and confidence >= 0.60:
+                result = execute_sell(symbol, price, reason="SIGNAL")
+                if result:
+                    msg = _format_exit_msg(result, price)
+                    for chat_id, syms in _watched.items():
+                        if symbol in syms:
+                            await _notify(chat_id, msg)
+
+
+def _format_buy_msg(trade: dict, pred: dict) -> str:
+    from utils.formatters import fmt_price
+    sl_pct    = trade.get("sl_pct", 0.05) * 100
+    tp_pct    = trade.get("tp_pct", 0.12) * 100
+    cls       = trade.get("asset_class", "").title()
+    sent      = pred.get("sentiment", 0)
+    mult      = trade.get("size_mult", 1.0)
+    warnings  = trade.get("warnings", [])
+
+    sent_note = ("Strong positive news" if sent > 0.2 else
+                 "Mild positive news"   if sent > 0.1 else
+                 "Negative news — reduced size" if sent < -0.1 else
+                 "Neutral")
+
+    lines = [
+        f"*Auto-Trade: BUY Executed*",
+        f"",
+        f"Symbol: *{trade['symbol']}* ({cls})",
+        f"Price: {fmt_price(trade['price'])}",
+        f"Quantity: {trade['quantity']:.6f}",
+        f"Cost: {fmt_price(trade['cost'])}  (size factor: {mult:.2f}x)",
+        f"Stop Loss: {fmt_price(trade['stop_loss'])} (-{sl_pct:.0f}%)",
+        f"Take Profit: {fmt_price(trade['take_profit'])} (+{tp_pct:.0f}%)",
+        f"ML Confidence: *{trade['confidence']*100:.1f}%*",
+        f"Sentiment: {sent:+.3f} — {sent_note}",
+        f"Trailing stop: active",
+    ]
+    if warnings:
+        lines.append(f"Notes: {'; '.join(warnings)}")
+    return "\n".join(lines)
+
+
+def _format_exit_msg(result: dict, price: float) -> str:
+    from utils.formatters import fmt_price
+    emoji = "✅" if result["result"] == "WIN" else "❌"
+    reason_map = {
+        "STOP_LOSS":             "Stop Loss Hit",
+        "TAKE_PROFIT":           "Take Profit Hit",
+        "SIGNAL":                "ML Sell Signal",
+        "MANUAL":                "Manual Close",
+        "TRAILING_STOP":         "Trailing Stop Hit — profit was locked in",
+        "EARLY_EXIT_REVERSAL":   "Smart Exit — model flipped SELL while in profit",
+        "EARLY_EXIT_MOMENTUM":   "Smart Exit — price reversing, locked in gains early",
+        "CUT_LOSS":              "Smart Exit — model says SELL, cutting loss before it grows",
+    }
+    reason = reason_map.get(result["reason"], result["reason"])
+    return (
+        f"{emoji} *Auto-Trade: Position Closed*\n\n"
+        f"Symbol: *{result['symbol']}*\n"
+        f"Reason: {reason}\n"
+        f"Entry: {fmt_price(result['entry_price'])}  →  Exit: {fmt_price(result['exit_price'])}\n"
+        f"P&L: {result['pnl']:+.2f} ({result['pnl_pct']:+.2f}%)\n"
+        f"Result: *{result['result']}*"
+    )

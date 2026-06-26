@@ -1,0 +1,11 @@
+.env
+*.db
+*.db-shm
+*.db-wal
+*.log
+__pycache__/
+*.pyc
+*.joblib
+models/
+.bot.pid
+*.bak
