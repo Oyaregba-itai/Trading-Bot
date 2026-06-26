@@ -17,7 +17,7 @@ from handlers.trading_handlers import (cmd_autotrade, cmd_wallet, cmd_trades,
 from handlers.extra_handlers import (cmd_movers, cmd_levels, cmd_calc,
                                       cmd_compare, cmd_dominance, cmd_gas,
                                       cmd_watchlist, cmd_report,
-                                      cmd_backtest, cmd_export, cmd_funding)
+                                      cmd_backtest, cmd_export, cmd_funding, cmd_status)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -285,6 +285,7 @@ def main():
     app.add_handler(CommandHandler("bt",        cmd_backtest))
     app.add_handler(CommandHandler("export",    cmd_export))
     app.add_handler(CommandHandler("funding",   cmd_funding))
+    app.add_handler(CommandHandler("status",    cmd_status))
 
     app.add_error_handler(error_handler)
 

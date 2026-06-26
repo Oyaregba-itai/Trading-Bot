@@ -776,6 +776,52 @@ async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── /funding ──────────────────────────────────────────────────────────────────
 
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/status — show live bot activity stats."""
+    from trading.auto_trader import get_activity_status, is_watching
+    import database as db
+
+    chat_id = update.effective_chat.id
+    s = get_activity_status()
+
+    if s["last_cycle"] is None:
+        last = "No cycle run yet — first cycle starts within 15 min"
+    else:
+        diff = (s["last_cycle"].replace(tzinfo=None) if s["last_cycle"].tzinfo else s["last_cycle"])
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        secs = int((now - s["last_cycle"]).total_seconds())
+        if secs < 60:
+            last = f"{secs}s ago"
+        else:
+            last = f"{secs // 60}m {secs % 60}s ago"
+
+    active = is_watching(chat_id)
+    wallet = db.get_wallet()
+    total  = (wallet["cash"] + wallet["positions_value"]) if wallet else 10000
+    ret    = ((total - 10000) / 10000) * 100
+
+    lines = [
+        f"*Bot Status*",
+        f"",
+        f"{'🟢 AUTO-TRADING ACTIVE' if active else '🔴 AUTO-TRADING INACTIVE'}",
+        f"Watching: {s['watching']} symbols",
+        f"",
+        f"*Last Cycle:* {last}",
+        f"Symbols scanned: {s['scanned']}",
+        f"Trades executed: {s['trades']}",
+        f"Filtered/skipped: {s['skipped']}",
+        f"Total cycles run: {s['total_cycles']}",
+        f"",
+        f"*Open Positions:* {s['open_positions']}",
+        f"*Wallet:* ${total:,.2f} ({ret:+.2f}%)",
+        f"",
+        f"Next full scan: within 15 min",
+        f"Position monitor: every 2 min",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
 async def cmd_funding(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/funding BTC — show crypto futures funding rate."""
     if not ctx.args:

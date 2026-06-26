@@ -8,6 +8,7 @@ Each cycle:
 """
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,13 @@ logger = logging.getLogger(__name__)
 _watched: dict[int, set] = {}
 # Notification callback: (chat_id, message) -> None
 _notify_cb: Callable | None = None
+
+# Activity tracking
+_last_cycle_time: datetime | None = None
+_last_cycle_scanned: int = 0
+_last_cycle_trades: int = 0
+_last_cycle_skipped: int = 0
+_total_cycles: int = 0
 
 DEFAULT_SYMBOLS = [
     # Crypto
@@ -123,8 +131,24 @@ def _asset_type(symbol: str) -> str:
     return "stock"
 
 
+def get_activity_status() -> dict:
+    """Returns current bot activity stats for /status command."""
+    import database as db
+    positions = db.get_all_positions() or []
+    return {
+        "last_cycle":    _last_cycle_time,
+        "scanned":       _last_cycle_scanned,
+        "trades":        _last_cycle_trades,
+        "skipped":       _last_cycle_skipped,
+        "total_cycles":  _total_cycles,
+        "open_positions": len(positions),
+        "watching":      sum(len(v) for v in _watched.values()),
+    }
+
+
 async def run_trading_cycle(app=None):
     """Called by APScheduler every N minutes."""
+    global _last_cycle_time, _last_cycle_scanned, _last_cycle_trades, _last_cycle_skipped, _total_cycles
     from trading.demo_wallet import execute_buy, execute_sell, check_stop_take
     from ml.trainer import predict_symbol
     from data.sentiment import aggregate_sentiment
@@ -136,6 +160,12 @@ async def run_trading_cycle(app=None):
 
     if not _watched:
         return
+
+    _last_cycle_time = datetime.now(timezone.utc)
+    _total_cycles += 1
+    cycle_scanned = 0
+    cycle_trades = 0
+    cycle_skipped = 0
 
     fg_data = get_fear_greed()
     fear_greed = fg_data["value"] if fg_data else 50
@@ -182,6 +212,8 @@ async def run_trading_cycle(app=None):
         if price is None:
             continue
 
+        cycle_scanned += 1
+
         # 1. Check stop-loss / take-profit / trailing stop
         result = check_stop_take(symbol, price)
         if result:
@@ -189,6 +221,7 @@ async def run_trading_cycle(app=None):
             for chat_id, syms in _watched.items():
                 if symbol in syms:
                     await _notify(chat_id, msg)
+            cycle_trades += 1
             continue
 
         # 2. Get sentiment + ML prediction
@@ -202,9 +235,11 @@ async def run_trading_cycle(app=None):
             pred = predict_symbol(symbol, sentiment_score, fear_greed)
         except Exception as e:
             logger.error("Prediction error %s: %s", symbol, e)
+            cycle_skipped += 1
             continue
 
         if "error" in pred:
+            cycle_skipped += 1
             continue
 
         # Block stablecoins
@@ -222,6 +257,7 @@ async def run_trading_cycle(app=None):
             rec = meta.get("recall_s", 0) or 0
             if (acc > 0.75 and n < 200) or (rec < 0.10 and acc > 0.75):
                 logger.info("Skipping %s — overfit model", symbol)
+                cycle_skipped += 1
                 continue
 
         signal     = pred["signal"]
@@ -229,7 +265,6 @@ async def run_trading_cycle(app=None):
         asset_type = _asset_type(symbol)
 
         # 3. Smart position review for EXISTING positions
-        #    Re-evaluates: should we exit early or tighten the stop?
         if get_position(symbol):
             from trading.demo_wallet import smart_position_review
             smart_result = smart_position_review(symbol, price, sentiment_score, fear_greed)
@@ -238,29 +273,28 @@ async def run_trading_cycle(app=None):
                 for chat_id, syms in _watched.items():
                     if symbol in syms:
                         await _notify(chat_id, msg)
-            continue  # Don't try to re-buy while holding
+                cycle_trades += 1
+            continue
 
         # 4. Open new position — run extra smart checks first
         if signal == "BUY" and confidence >= 0.60:
 
-            # Earnings blackout for stocks
             blacked_out, earn_reason = earnings_blackout(symbol)
             if blacked_out:
                 logger.info("Skipping %s — %s", symbol, earn_reason)
+                cycle_skipped += 1
                 continue
 
-            # Multi-timeframe: 4H must agree with daily signal
             tf_ok, tf_reason = timeframe_aligned(symbol, signal)
             if not tf_ok:
                 logger.info("Skipping %s — %s", symbol, tf_reason)
+                cycle_skipped += 1
                 continue
 
-            # Social volume spike warning (don't block, but log)
             spike, spike_msg = social_volume_spike(symbol)
             if spike:
                 logger.info("%s social spike: %s", symbol, spike_msg)
 
-            # Funding rate size adjustment for crypto
             fund_mult = funding_rate_size_mult(symbol, signal)
 
             trade = execute_buy(symbol, asset_type, price, confidence, signal,
@@ -272,6 +306,7 @@ async def run_trading_cycle(app=None):
                 for chat_id, syms in _watched.items():
                     if symbol in syms:
                         await _notify(chat_id, msg)
+                cycle_trades += 1
 
         elif signal == "SELL":
             pos = get_position(symbol)
@@ -282,6 +317,24 @@ async def run_trading_cycle(app=None):
                     for chat_id, syms in _watched.items():
                         if symbol in syms:
                             await _notify(chat_id, msg)
+                    cycle_trades += 1
+
+    # ── Cycle summary ─────────────────────────────────────────────────────────
+    _last_cycle_scanned = cycle_scanned
+    _last_cycle_trades  = cycle_trades
+    _last_cycle_skipped = cycle_skipped
+
+    import database as db
+    open_count = len(db.get_all_positions() or [])
+    now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    trade_note = f"{cycle_trades} trade(s) executed" if cycle_trades else "no new trades"
+    summary = (
+        f"🤖 *Cycle #{_total_cycles} complete* — {now_str}\n"
+        f"Scanned {cycle_scanned} symbols | {trade_note}\n"
+        f"Open positions: {open_count} | Skipped (filters): {cycle_skipped}"
+    )
+    for chat_id in _watched:
+        await _notify(chat_id, summary)
 
 
 def _format_buy_msg(trade: dict, pred: dict) -> str:
