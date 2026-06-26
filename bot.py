@@ -374,23 +374,23 @@ def main():
         interval=900,   # 15 minutes
         first=90,
     )
-    # Daily auto-retraining at 2:00 AM UTC — keeps models fresh
+    from handlers.extra_handlers import send_daily_report
+    import datetime as dt
+    # Daily auto-retraining at 2:00 AM UTC (3 AM Nigeria time)
     jq.run_daily(
         lambda ctx: asyncio.ensure_future(auto_retrain(app)),
-        time=datetime.time(hour=2, minute=0),
+        time=dt.time(hour=2, minute=0),
     )
     # Daily market report at 8:00 AM UTC
-    from handlers.extra_handlers import send_daily_report
-    import datetime
     jq.run_daily(
         lambda ctx: asyncio.ensure_future(send_daily_report(app)),
-        time=datetime.time(hour=8, minute=0),
+        time=dt.time(hour=8, minute=0),
     )
     # Weekly performance report every Sunday at 9:00 AM UTC
     jq.run_daily(
         lambda ctx: asyncio.ensure_future(_weekly_report(app)),
-        time=datetime.time(hour=9, minute=0),
-        days=(6,),  # Sunday only
+        time=dt.time(hour=9, minute=0),
+        days=(6,),
     )
 
     logger.info("Trading Bot with ML started. Press Ctrl+C to stop.")
