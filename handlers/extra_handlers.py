@@ -783,30 +783,40 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     import database as db
 
     chat_id = update.effective_chat.id
-    s = get_activity_status()
+
+    try:
+        s = get_activity_status()
+    except Exception:
+        s = {"last_cycle": None, "scanned": 0, "trades": 0,
+             "skipped": 0, "total_cycles": 0, "open_positions": 0, "watching": 0}
 
     if s["last_cycle"] is None:
-        last = "No cycle run yet — first scan within 15 min"
+        last = "No cycle yet — first scan within 15 min"
     else:
         try:
-            now  = datetime.now(timezone.utc)
-            lc   = s["last_cycle"]
+            now = datetime.now(timezone.utc)
+            lc  = s["last_cycle"]
             if lc.tzinfo is None:
                 lc = lc.replace(tzinfo=timezone.utc)
             secs = max(0, int((now - lc).total_seconds()))
             last = f"{secs}s ago" if secs < 60 else f"{secs // 60}m {secs % 60}s ago"
         except Exception:
-            last = str(s["last_cycle"])
+            last = "unknown"
 
-    active = is_watching(chat_id)
+    try:
+        active = is_watching(chat_id)
+    except Exception:
+        active = False
+
     try:
         cash      = db.get_cash()
         positions = db.get_all_positions() or []
-        pos_value = sum(p["quantity"] * (_get_pos_price(p["symbol"]) or p["entry_price"]) for p in positions)
+        pos_value = sum(float(p["quantity"]) * float(p["entry_price"]) for p in positions)
         total     = cash + pos_value
+        ret       = ((total - 10000) / 10000) * 100
+        wallet_str = f"${total:,.2f} ({ret:+.2f}%)"
     except Exception:
-        total = 10000.0
-    ret = ((total - 10000) / 10000) * 100
+        wallet_str = "unavailable"
 
     lines = [
         "*Bot Status*",
@@ -821,25 +831,12 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Total cycles run: {s['total_cycles']}",
         "",
         f"*Open Positions:* {s['open_positions']}",
-        f"*Wallet:* ${total:,.2f} ({ret:+.2f}%)",
+        f"*Wallet:* {wallet_str}",
         "",
         "Next full scan: within 15 min",
         "Position monitor: every 2 min",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
-
-def _get_pos_price(symbol: str):
-    try:
-        import yfinance as yf
-        from config import CRYPTO_IDS
-        ticker = CRYPTO_IDS.get(symbol, symbol)
-        if symbol in CRYPTO_IDS:
-            ticker = ticker + "-USD"
-        t = yf.Ticker(ticker)
-        return t.fast_info["last_price"]
-    except Exception:
-        return None
 
 
 async def cmd_funding(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
