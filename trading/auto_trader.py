@@ -78,17 +78,16 @@ def restore_sessions():
 
 
 def _ensure_default_session():
-    """If _watched is empty, auto-start using DEFAULT_CHAT_ID env var."""
+    """If _watched is empty, auto-start for the owner's chat ID."""
     import os
     if _watched:
         return
-    env_id = os.environ.get("DEFAULT_CHAT_ID")
-    if not env_id:
-        return
+    # Try env var first, then fall back to hardcoded owner ID
+    env_id = os.environ.get("DEFAULT_CHAT_ID", "7819653477")
     try:
         chat_id = int(env_id)
-    except ValueError:
-        return
+    except (ValueError, TypeError):
+        chat_id = 7819653477
     all_syms = set(DEFAULT_SYMBOLS)
     try:
         from handlers.ml_handlers import ALL_SYMBOLS
@@ -96,7 +95,7 @@ def _ensure_default_session():
     except Exception:
         pass
     _watched[chat_id] = all_syms
-    logger.info("Auto-started session from DEFAULT_CHAT_ID=%d (%d symbols)", chat_id, len(all_syms))
+    logger.info("Auto-started session for chat %d (%d symbols)", chat_id, len(all_syms))
 
 
 def get_watched(chat_id: int) -> set:
