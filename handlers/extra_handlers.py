@@ -779,47 +779,67 @@ async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/status — show live bot activity stats."""
     from trading.auto_trader import get_activity_status, is_watching
+    from datetime import datetime, timezone
     import database as db
 
     chat_id = update.effective_chat.id
     s = get_activity_status()
 
     if s["last_cycle"] is None:
-        last = "No cycle run yet — first cycle starts within 15 min"
+        last = "No cycle run yet — first scan within 15 min"
     else:
-        diff = (s["last_cycle"].replace(tzinfo=None) if s["last_cycle"].tzinfo else s["last_cycle"])
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        secs = int((now - s["last_cycle"]).total_seconds())
-        if secs < 60:
-            last = f"{secs}s ago"
-        else:
-            last = f"{secs // 60}m {secs % 60}s ago"
+        try:
+            now  = datetime.now(timezone.utc)
+            lc   = s["last_cycle"]
+            if lc.tzinfo is None:
+                lc = lc.replace(tzinfo=timezone.utc)
+            secs = max(0, int((now - lc).total_seconds()))
+            last = f"{secs}s ago" if secs < 60 else f"{secs // 60}m {secs % 60}s ago"
+        except Exception:
+            last = str(s["last_cycle"])
 
     active = is_watching(chat_id)
-    wallet = db.get_wallet()
-    total  = (wallet["cash"] + wallet["positions_value"]) if wallet else 10000
-    ret    = ((total - 10000) / 10000) * 100
+    try:
+        cash      = db.get_cash()
+        positions = db.get_all_positions() or []
+        pos_value = sum(p["quantity"] * (_get_pos_price(p["symbol"]) or p["entry_price"]) for p in positions)
+        total     = cash + pos_value
+    except Exception:
+        total = 10000.0
+    ret = ((total - 10000) / 10000) * 100
 
     lines = [
-        f"*Bot Status*",
-        f"",
+        "*Bot Status*",
+        "",
         f"{'🟢 AUTO-TRADING ACTIVE' if active else '🔴 AUTO-TRADING INACTIVE'}",
         f"Watching: {s['watching']} symbols",
-        f"",
+        "",
         f"*Last Cycle:* {last}",
         f"Symbols scanned: {s['scanned']}",
         f"Trades executed: {s['trades']}",
         f"Filtered/skipped: {s['skipped']}",
         f"Total cycles run: {s['total_cycles']}",
-        f"",
+        "",
         f"*Open Positions:* {s['open_positions']}",
         f"*Wallet:* ${total:,.2f} ({ret:+.2f}%)",
-        f"",
-        f"Next full scan: within 15 min",
-        f"Position monitor: every 2 min",
+        "",
+        "Next full scan: within 15 min",
+        "Position monitor: every 2 min",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+def _get_pos_price(symbol: str):
+    try:
+        import yfinance as yf
+        from config import CRYPTO_IDS
+        ticker = CRYPTO_IDS.get(symbol, symbol)
+        if symbol in CRYPTO_IDS:
+            ticker = ticker + "-USD"
+        t = yf.Ticker(ticker)
+        return t.fast_info["last_price"]
+    except Exception:
+        return None
 
 
 async def cmd_funding(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
