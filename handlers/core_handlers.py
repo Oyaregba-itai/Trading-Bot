@@ -84,6 +84,25 @@ async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Your Chat ID: `{chat_id}`", parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    import os
+    from trading.auto_trader import _watched, _ensure_default_session
+    chat_id = update.effective_chat.id
+    env_val = os.environ.get("DEFAULT_CHAT_ID", "NOT SET")
+    watched_before = dict(_watched)
+    _ensure_default_session()
+    watched_after = dict(_watched)
+    lines = [
+        f"chat_id: {chat_id}",
+        f"DEFAULT_CHAT_ID env: {env_val}",
+        f"_watched before: {list(watched_before.keys())}",
+        f"_watched after: {list(watched_after.keys())}",
+        f"watching me: {chat_id in watched_after}",
+        f"symbols: {len(watched_after.get(chat_id, []))}",
+    ]
+    await update.message.reply_text("\n".join(lines))
+
+
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     import logging
     logging.getLogger(__name__).error("Error: %s", ctx.error, exc_info=ctx.error)
