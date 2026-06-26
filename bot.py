@@ -126,29 +126,32 @@ async def run_position_monitor(app: Application):
 
 async def auto_retrain(app: Application):
     """
-    Weekly background retraining job.
-    Runs every 7 days, retrains all models in a background thread,
-    then notifies all active auto-trade users when done.
+    Daily background retraining job at 2 AM UTC (3 AM Nigeria time).
+    Retrains all 48 models in a background thread and notifies owner when done.
     """
     import threading
-    from trading.auto_trader import _watched
+    from trading.auto_trader import _watched, _ensure_default_session
     from ml.trainer import train_symbol
     from handlers.ml_handlers import ALL_SYMBOLS
 
+    _ensure_default_session()
     notify_chats = list(_watched.keys())
     loop = asyncio.get_event_loop()
 
     def _notify_chats(msg: str):
         for chat_id in notify_chats:
-            asyncio.run_coroutine_threadsafe(
-                app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown"),
-                loop,
-            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown"),
+                    loop,
+                ).result(timeout=15)
+            except Exception:
+                pass
 
     def _run():
-        logger.info("Auto-retraining all models…")
+        logger.info("Auto-retraining all %d models…", len(ALL_SYMBOLS))
         if notify_chats:
-            _notify_chats("*Auto-Retraining Started*\n\nWeekly model update — retraining all 9 symbols with latest data. This takes ~5 minutes.")
+            _notify_chats(f"*Nightly Retraining Started*\n\nRetraining all {len(ALL_SYMBOLS)} models with latest market data.\nThis takes ~10 minutes — you'll get a summary when done.")
         results = []
         for sym in ALL_SYMBOLS:
             try:
@@ -159,11 +162,21 @@ async def auto_retrain(app: Application):
 
         ok  = [r for r in results if "error" not in r]
         err = [r for r in results if "error" in r]
+
+        # Safe accuracy formatting — guard against missing key
+        ok_lines = ""
+        for r in ok:
+            acc = r.get("accuracy")
+            if acc is not None:
+                ok_lines += f"  • {r['symbol']}: {acc*100:.1f}%\n"
+            else:
+                ok_lines += f"  • {r['symbol']}: trained\n"
+
         summary = (
-            f"*Auto-Retraining Complete*\n\n"
-            f"✅ {len(ok)} models updated\n" +
-            "".join(f"  • {r['symbol']}: {r['accuracy']*100:.1f}%\n" for r in ok) +
-            (f"\n❌ {len(err)} failed: {', '.join(r['symbol'] for r in err)}" if err else "")
+            f"*Nightly Retraining Complete*\n\n"
+            f"✅ {len(ok)}/{len(ALL_SYMBOLS)} models updated\n"
+            + ok_lines
+            + (f"\n❌ {len(err)} failed: {', '.join(r['symbol'] for r in err)}" if err else "")
         )
         logger.info("Auto-retraining done: %d ok, %d failed", len(ok), len(err))
         if notify_chats:
