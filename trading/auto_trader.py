@@ -77,11 +77,35 @@ def restore_sessions():
             logger.info("Auto-started trading for chat %d with %d symbols", chat_id, len(all_syms))
 
 
+def _ensure_default_session():
+    """If _watched is empty, auto-start using DEFAULT_CHAT_ID env var."""
+    import os
+    if _watched:
+        return
+    env_id = os.environ.get("DEFAULT_CHAT_ID")
+    if not env_id:
+        return
+    try:
+        chat_id = int(env_id)
+    except ValueError:
+        return
+    all_syms = set(DEFAULT_SYMBOLS)
+    try:
+        from handlers.ml_handlers import ALL_SYMBOLS
+        all_syms = set(ALL_SYMBOLS)
+    except Exception:
+        pass
+    _watched[chat_id] = all_syms
+    logger.info("Auto-started session from DEFAULT_CHAT_ID=%d (%d symbols)", chat_id, len(all_syms))
+
+
 def get_watched(chat_id: int) -> set:
+    _ensure_default_session()
     return _watched.get(chat_id, set())
 
 
 def is_watching(chat_id: int) -> bool:
+    _ensure_default_session()
     return bool(_watched.get(chat_id))
 
 
@@ -159,6 +183,7 @@ async def run_trading_cycle(app=None):
                                         funding_rate_size_mult, social_volume_spike)
     from utils.formatters import fmt_price
 
+    _ensure_default_session()
     if not _watched:
         return
 
