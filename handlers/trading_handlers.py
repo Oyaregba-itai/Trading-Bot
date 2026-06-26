@@ -25,7 +25,7 @@ async def cmd_autotrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"*Auto-Trading: ACTIVE*\n\n"
                 f"Watching: {', '.join(sorted(symbols))}\n\n"
-                f"Checks every 15 minutes.\n"
+                f"Position monitor every 2 minutes. New trades every 15 minutes.\n"
                 f"Use `/autotrade stop` to halt.",
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -104,7 +104,7 @@ async def cmd_autotrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Position size: 20% per trade",
             f"Stop loss: -5% | Take profit: +12%",
             f"Min ML confidence: 60%\n",
-            f"Checks signals every *15 minutes*. Notifies on every trade.\n",
+            f"Position monitor every *2 minutes* (SL/TP/exits). New trades every *15 minutes*. Notifies on every trade.\n",
             f"_Train new symbols with `/train GOLD`, `/train GBPUSD` etc._",
         ]
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
