@@ -51,7 +51,8 @@ def stop_watching(chat_id: int):
 
 def restore_sessions():
     """Load saved autotrade sessions from DB on bot startup.
-    If no session exists but a chat_id is known, auto-start with all default symbols."""
+    Falls back to DEFAULT_CHAT_ID env var so Railway restarts auto-resume trading."""
+    import os
     from database import load_all_autotrade_sessions, get_last_chat_id, save_autotrade_session
 
     sessions = load_all_autotrade_sessions()
@@ -61,11 +62,11 @@ def restore_sessions():
         total = sum(len(v) for v in sessions.values())
         logger.info("Restored %d autotrade session(s) with %d symbols", len(sessions), total)
     else:
-        # No saved session — try to auto-start with the last known user
-        chat_id = get_last_chat_id()
+        # Try env var first (set on Railway so deploys always auto-resume)
+        env_chat_id = os.environ.get("DEFAULT_CHAT_ID")
+        chat_id = int(env_chat_id) if env_chat_id else get_last_chat_id()
         if chat_id:
             all_syms = set(DEFAULT_SYMBOLS)
-            # Add full symbol list
             try:
                 from handlers.ml_handlers import ALL_SYMBOLS
                 all_syms = set(ALL_SYMBOLS)
