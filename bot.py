@@ -233,11 +233,29 @@ def main():
     init_db()
 
     # Restore autotrade sessions that were active before restart
-    from trading.auto_trader import restore_sessions
+    from trading.auto_trader import restore_sessions, _ensure_default_session
     restore_sessions()
+    _ensure_default_session()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     _setup_notify_callback(app)
+
+    # Post-init: notify owner that bot started and trading is active
+    async def _on_startup(application):
+        import os
+        from trading.auto_trader import _watched
+        chat_id = int(os.environ.get("DEFAULT_CHAT_ID", "0"))
+        if chat_id and _watched:
+            sym_count = sum(len(v) for v in _watched.values())
+            try:
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Bot restarted and is ACTIVE\nWatching {sym_count} symbols. Auto-trading ON."
+                )
+            except Exception:
+                pass
+
+    app.post_init = _on_startup
 
     # ── Core ──────────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", cmd_start))
