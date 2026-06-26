@@ -79,6 +79,11 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"Your Chat ID: `{chat_id}`", parse_mode=ParseMode.MARKDOWN)
+
+
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     import logging
     logging.getLogger(__name__).error("Error: %s", ctx.error, exc_info=ctx.error)

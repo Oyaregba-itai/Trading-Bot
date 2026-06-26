@@ -5,7 +5,7 @@ from telegram.ext import Application, CommandHandler
 
 from config import TELEGRAM_TOKEN, ALERT_CHECK_INTERVAL
 from database import init_db
-from handlers.core_handlers import cmd_start, cmd_help, error_handler
+from handlers.core_handlers import cmd_start, cmd_help, cmd_myid, error_handler
 from handlers.price_handlers import cmd_price, cmd_top, cmd_trending, cmd_fear_greed, cmd_market
 from handlers.analysis_handlers import cmd_analyze, cmd_rsi, cmd_macd
 from handlers.alert_handlers import cmd_alert, cmd_alerts, cmd_cancel_alert
@@ -241,7 +241,8 @@ def main():
 
     # ── Core ──────────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("help",  cmd_help))
+    app.add_handler(CommandHandler("myid",  cmd_myid))
 
     # ── Price ─────────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("price", cmd_price))
