@@ -253,20 +253,60 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     _setup_notify_callback(app)
 
-    # Post-init: notify owner that bot started and trading is active
+    # Post-init: notify owner, auto-train if models are missing
     async def _on_startup(application):
-        import os
+        import os, threading
         from trading.auto_trader import _watched
+        from handlers.ml_handlers import ALL_SYMBOLS
+        from database import get_all_models
+
         chat_id = int(os.environ.get("DEFAULT_CHAT_ID", "0"))
+
+        # Check how many models exist
+        trained = {r["symbol"] for r in (get_all_models() or [])}
+        missing = [s for s in ALL_SYMBOLS if s not in trained]
+
         if chat_id and _watched:
             sym_count = sum(len(v) for v in _watched.values())
             try:
+                status = "Auto-trading ON."
+                if missing:
+                    status = f"Models missing ({len(missing)}/{len(ALL_SYMBOLS)}) — auto-training now in background. Trading starts after training."
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"Bot restarted and is ACTIVE\nWatching {sym_count} symbols. Auto-trading ON."
+                    text=f"Bot restarted and is ACTIVE\nWatching {sym_count} symbols. {status}"
                 )
             except Exception:
                 pass
+
+        # If models are missing, auto-train in background without blocking startup
+        if missing:
+            async def _bg_train():
+                from ml.trainer import train_symbol
+                import concurrent.futures
+                loop = asyncio.get_event_loop()
+                ok, err = [], []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    for sym in ALL_SYMBOLS:
+                        try:
+                            r = await loop.run_in_executor(pool, train_symbol, sym)
+                            ok.append(r)
+                        except Exception as e:
+                            err.append(sym)
+                            logger.error("Startup train failed %s: %s", sym, e)
+                summary = (
+                    f"Auto-Training Complete\n\n"
+                    f"{len(ok)}/{len(ALL_SYMBOLS)} models trained\n"
+                    + (f"Failed: {', '.join(err)}" if err else "All models ready.")
+                    + "\n\nAuto-trading is now fully active."
+                )
+                if chat_id:
+                    try:
+                        await application.bot.send_message(chat_id=chat_id, text=summary)
+                    except Exception:
+                        pass
+
+            asyncio.ensure_future(_bg_train())
 
     app.post_init = _on_startup
 
