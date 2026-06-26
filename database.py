@@ -315,7 +315,7 @@ def create_grid(chat_id, symbol, low, high, levels, grid_size, state_json):
             INSERT INTO grid_bots (chat_id, symbol, low, high, levels, grid_size, state, created_at)
             VALUES (?,?,?,?,?,?,?,?)
         """, (chat_id, symbol, low, high, levels, grid_size, state_json, datetime.utcnow().isoformat()))
-        return c.lastrowid
+        return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 def get_active_grids(chat_id=None):
     with get_conn() as c:
@@ -344,7 +344,7 @@ def create_dca(chat_id, symbol, amount_usd, interval_type, next_run):
             INSERT INTO dca_schedules (chat_id, symbol, amount_usd, interval_type, next_run, created_at)
             VALUES (?,?,?,?,?,?)
         """, (chat_id, symbol, amount_usd, interval_type, next_run, datetime.utcnow().isoformat()))
-        return c.lastrowid
+        return c.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 def get_active_dcas(chat_id=None):
     with get_conn() as c:
