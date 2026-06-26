@@ -91,6 +91,37 @@ def init_db():
             symbol      TEXT    NOT NULL,
             PRIMARY KEY (chat_id, symbol)
         );
+
+        CREATE TABLE IF NOT EXISTS grid_bots (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     INTEGER NOT NULL,
+            symbol      TEXT    NOT NULL,
+            low         REAL    NOT NULL,
+            high        REAL    NOT NULL,
+            levels      INTEGER NOT NULL,
+            grid_size   REAL    NOT NULL,
+            total_profit REAL   DEFAULT 0,
+            trades_done  INTEGER DEFAULT 0,
+            last_price  REAL,
+            state       TEXT    NOT NULL DEFAULT '{}',
+            created_at  TEXT    NOT NULL,
+            active      INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS dca_schedules (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id         INTEGER NOT NULL,
+            symbol          TEXT    NOT NULL,
+            amount_usd      REAL    NOT NULL,
+            interval_type   TEXT    NOT NULL,
+            next_run        TEXT    NOT NULL,
+            total_invested  REAL    DEFAULT 0,
+            total_qty       REAL    DEFAULT 0,
+            avg_price       REAL    DEFAULT 0,
+            runs_done       INTEGER DEFAULT 0,
+            active          INTEGER DEFAULT 1,
+            created_at      TEXT    NOT NULL
+        );
     """)
 
     # Seed wallet if empty
@@ -274,3 +305,61 @@ def log_sentiment(symbol, source, score, headline=""):
             INSERT INTO sentiment_log (symbol, source, score, headline, logged_at)
             VALUES (?,?,?,?,?)
         """, (symbol, source, score, headline, datetime.utcnow().isoformat()))
+
+
+# ── Grid bot helpers ──────────────────────────────────────────────────────────
+
+def create_grid(chat_id, symbol, low, high, levels, grid_size, state_json):
+    with get_conn() as c:
+        c.execute("""
+            INSERT INTO grid_bots (chat_id, symbol, low, high, levels, grid_size, state, created_at)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (chat_id, symbol, low, high, levels, grid_size, state_json, datetime.utcnow().isoformat()))
+        return c.lastrowid
+
+def get_active_grids(chat_id=None):
+    with get_conn() as c:
+        if chat_id:
+            return c.execute("SELECT * FROM grid_bots WHERE active=1 AND chat_id=?", (chat_id,)).fetchall()
+        return c.execute("SELECT * FROM grid_bots WHERE active=1").fetchall()
+
+def update_grid(grid_id, last_price, state_json, profit_delta=0, trades_delta=0):
+    with get_conn() as c:
+        c.execute("""
+            UPDATE grid_bots SET last_price=?, state=?,
+              total_profit=total_profit+?, trades_done=trades_done+?
+            WHERE id=?
+        """, (last_price, state_json, profit_delta, trades_delta, grid_id))
+
+def stop_grid(grid_id):
+    with get_conn() as c:
+        c.execute("UPDATE grid_bots SET active=0 WHERE id=?", (grid_id,))
+
+
+# ── DCA helpers ───────────────────────────────────────────────────────────────
+
+def create_dca(chat_id, symbol, amount_usd, interval_type, next_run):
+    with get_conn() as c:
+        c.execute("""
+            INSERT INTO dca_schedules (chat_id, symbol, amount_usd, interval_type, next_run, created_at)
+            VALUES (?,?,?,?,?,?)
+        """, (chat_id, symbol, amount_usd, interval_type, next_run, datetime.utcnow().isoformat()))
+        return c.lastrowid
+
+def get_active_dcas(chat_id=None):
+    with get_conn() as c:
+        if chat_id:
+            return c.execute("SELECT * FROM dca_schedules WHERE active=1 AND chat_id=?", (chat_id,)).fetchall()
+        return c.execute("SELECT * FROM dca_schedules WHERE active=1").fetchall()
+
+def update_dca(dca_id, next_run, qty_bought, amount_spent, new_avg):
+    with get_conn() as c:
+        c.execute("""
+            UPDATE dca_schedules SET next_run=?, total_qty=total_qty+?,
+              total_invested=total_invested+?, avg_price=?, runs_done=runs_done+1
+            WHERE id=?
+        """, (next_run, qty_bought, amount_spent, new_avg, dca_id))
+
+def stop_dca(dca_id):
+    with get_conn() as c:
+        c.execute("UPDATE dca_schedules SET active=0 WHERE id=?", (dca_id,))

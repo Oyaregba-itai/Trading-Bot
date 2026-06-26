@@ -17,7 +17,9 @@ from handlers.trading_handlers import (cmd_autotrade, cmd_wallet, cmd_trades,
 from handlers.extra_handlers import (cmd_movers, cmd_levels, cmd_calc,
                                       cmd_compare, cmd_dominance, cmd_gas,
                                       cmd_watchlist, cmd_report,
-                                      cmd_backtest, cmd_export, cmd_funding, cmd_status)
+                                      cmd_backtest, cmd_export, cmd_funding, cmd_status,
+                                      cmd_grid, cmd_gridstop, cmd_gridview,
+                                      cmd_dca, cmd_dcastop, cmd_dcaview)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -54,6 +56,14 @@ async def check_alerts(app: Application):
 async def run_auto_trading(app: Application):
     from trading.auto_trader import run_trading_cycle
     await run_trading_cycle(app)
+
+
+async def run_dca_cycle(app: Application):
+    from trading.dca_bot import run_dca_cycle as _dca
+    from trading.auto_trader import _notify
+    notifications = _dca(app)
+    for chat_id, msg in notifications:
+        await _notify(chat_id, msg)
 
 
 async def run_position_monitor(app: Application):
@@ -102,6 +112,16 @@ async def run_position_monitor(app: Application):
                         await _notify(chat_id, msg)
         except Exception:
             pass
+
+    # 3. Grid bot cycle
+    try:
+        from trading.grid_bot import run_grid_cycle
+        from trading.auto_trader import _notify
+        grid_notifications = run_grid_cycle(app)
+        for chat_id, msg in grid_notifications:
+            await _notify(chat_id, msg)
+    except Exception:
+        pass
 
 
 async def auto_retrain(app: Application):
@@ -286,6 +306,12 @@ def main():
     app.add_handler(CommandHandler("export",    cmd_export))
     app.add_handler(CommandHandler("funding",   cmd_funding))
     app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("grid",      cmd_grid))
+    app.add_handler(CommandHandler("gridstop",  cmd_gridstop))
+    app.add_handler(CommandHandler("gridview",  cmd_gridview))
+    app.add_handler(CommandHandler("dca",       cmd_dca))
+    app.add_handler(CommandHandler("dcastop",   cmd_dcastop))
+    app.add_handler(CommandHandler("dcaview",   cmd_dcaview))
 
     app.add_error_handler(error_handler)
 
@@ -297,11 +323,17 @@ def main():
         interval=ALERT_CHECK_INTERVAL,
         first=15,
     )
-    # Fast position monitor every 2 minutes — SL/TP/trailing stop/smart exit only
+    # Fast position monitor every 2 minutes — SL/TP/trailing stop/smart exit + grid
     jq.run_repeating(
         lambda ctx: asyncio.ensure_future(run_position_monitor(app)),
         interval=120,   # 2 minutes
         first=30,
+    )
+    # DCA cycle every 15 minutes — check if any DCA buy is due
+    jq.run_repeating(
+        lambda ctx: asyncio.ensure_future(run_dca_cycle(app)),
+        interval=900,
+        first=120,
     )
     # Full trading cycle every 15 minutes — ML + sentiment + new trades
     jq.run_repeating(

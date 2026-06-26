@@ -860,3 +860,131 @@ async def cmd_funding(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Positive funding = longs paying shorts = bullish but possibly overcrowded.",
     ]
     await update.message.reply_text("\n".join(lines))
+
+
+# ── /grid ─────────────────────────────────────────────────────────────────────
+
+async def cmd_grid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/grid SYMBOL LOW HIGH LEVELS — start a grid trading bot."""
+    if len(ctx.args) < 4:
+        await update.message.reply_text(
+            "*Grid Bot Usage:*\n"
+            "`/grid BTC 60000 70000 10`\n\n"
+            "Creates 10 price levels between $60k-$70k.\n"
+            "Bot buys at each level, sells at the next one up.\n"
+            "Profits from price bouncing up and down.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    symbol = ctx.args[0].upper()
+    try:
+        low    = float(ctx.args[1])
+        high   = float(ctx.args[2])
+        levels = int(ctx.args[3])
+    except ValueError:
+        await update.message.reply_text("Invalid numbers. Usage: `/grid BTC 60000 70000 10`",
+                                        parse_mode=ParseMode.MARKDOWN)
+        return
+
+    chat_id = update.effective_chat.id
+    from trading.grid_bot import create_grid_bot
+    grid_id, msg = create_grid_bot(chat_id, symbol, low, high, levels)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_gridstop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/gridstop SYMBOL — stop a grid bot."""
+    import database as db
+    chat_id = update.effective_chat.id
+    grids = db.get_active_grids(chat_id)
+    if not grids:
+        await update.message.reply_text("No active grid bots.")
+        return
+
+    if ctx.args:
+        symbol = ctx.args[0].upper()
+        stopped = [g for g in grids if g["symbol"] == symbol]
+    else:
+        stopped = list(grids)
+
+    if not stopped:
+        await update.message.reply_text("No grid bot found for that symbol.")
+        return
+
+    for g in stopped:
+        db.stop_grid(g["id"])
+
+    symbols = ", ".join(g["symbol"] for g in stopped)
+    await update.message.reply_text(f"Grid bot stopped for: {symbols}")
+
+
+async def cmd_gridview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/gridview — show all active grid bots."""
+    from trading.grid_bot import get_grid_status
+    msg = get_grid_status(update.effective_chat.id)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
+# ── /dca ──────────────────────────────────────────────────────────────────────
+
+async def cmd_dca(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/dca SYMBOL AMOUNT INTERVAL — start a DCA bot."""
+    if len(ctx.args) < 3:
+        await update.message.reply_text(
+            "*DCA Bot Usage:*\n"
+            "`/dca BTC 50 weekly`\n"
+            "`/dca ETH 100 daily`\n"
+            "`/dca GOLD 200 monthly`\n\n"
+            "Buys a fixed $ amount at regular intervals.\n"
+            "Spreads your entry price to reduce timing risk.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    symbol   = ctx.args[0].upper()
+    try:
+        amount = float(ctx.args[1])
+    except ValueError:
+        await update.message.reply_text("Invalid amount. Example: `/dca BTC 50 weekly`",
+                                        parse_mode=ParseMode.MARKDOWN)
+        return
+    interval = ctx.args[2].lower()
+
+    chat_id = update.effective_chat.id
+    from trading.dca_bot import create_dca_bot
+    dca_id, msg = create_dca_bot(chat_id, symbol, amount, interval)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_dcastop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/dcastop SYMBOL — stop a DCA bot."""
+    import database as db
+    chat_id = update.effective_chat.id
+    dcas = db.get_active_dcas(chat_id)
+    if not dcas:
+        await update.message.reply_text("No active DCA bots.")
+        return
+
+    if ctx.args:
+        symbol  = ctx.args[0].upper()
+        stopped = [d for d in dcas if d["symbol"] == symbol]
+    else:
+        stopped = list(dcas)
+
+    if not stopped:
+        await update.message.reply_text("No DCA bot found for that symbol.")
+        return
+
+    for d in stopped:
+        db.stop_dca(d["id"])
+
+    symbols = ", ".join(d["symbol"] for d in stopped)
+    await update.message.reply_text(f"DCA bot stopped for: {symbols}")
+
+
+async def cmd_dcaview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/dcaview — show all active DCA bots."""
+    from trading.dca_bot import get_dca_status
+    msg = get_dca_status(update.effective_chat.id)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
