@@ -19,3 +19,6 @@ nltk>=3.9.0
 
 # YouTube
 youtube-transcript-api>=0.6.0
+
+# Binance Testnet
+python-binance>=1.0.19

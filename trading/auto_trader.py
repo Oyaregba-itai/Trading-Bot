@@ -325,9 +325,28 @@ async def run_trading_cycle(app=None):
             trade = execute_buy(symbol, asset_type, price, confidence, signal,
                                 sentiment=sentiment_score * fund_mult)
             if trade:
+                # For crypto symbols, also place real order on Binance Testnet
+                binance_note = ""
+                if asset_type == "crypto":
+                    try:
+                        from trading.binance_broker import is_crypto_symbol, place_buy_order, is_available
+                        if is_available() and is_crypto_symbol(symbol):
+                            b_order = place_buy_order(
+                                symbol,
+                                trade["cost"],
+                                trade["stop_loss"],
+                                trade["take_profit"],
+                            )
+                            if b_order:
+                                binance_note = "\n🔗 Order placed on Binance Testnet"
+                    except Exception as _be:
+                        logger.warning("Binance order skipped for %s: %s", symbol, _be)
+
                 msg = _format_buy_msg(trade, pred)
                 if spike:
                     msg += f"\n⚡ Social spike: {spike_msg}"
+                if binance_note:
+                    msg += binance_note
                 for chat_id, syms in _watched.items():
                     if symbol in syms:
                         await _notify(chat_id, msg)
