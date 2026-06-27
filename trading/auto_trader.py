@@ -371,26 +371,83 @@ async def run_trading_cycle(app=None):
     _last_cycle_skipped = cycle_skipped
 
     import database as db
-    open_count = len(db.get_all_positions() or [])
+    from utils.formatters import fmt_price
+    open_positions = db.get_all_positions() or []
+    open_count = len(open_positions)
     now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    trade_note = f"{cycle_trades} trade(s) executed" if cycle_trades else "no new trades"
-    summary = (
-        f"🤖 *Cycle #{_total_cycles} complete* — {now_str}\n"
-        f"Scanned {cycle_scanned} symbols | {trade_note}\n"
-        f"Open positions: {open_count} | Skipped (filters): {cycle_skipped}"
-    )
+
+    lines = [f"🤖 *Cycle #{_total_cycles} complete* — {now_str}"]
+    lines.append(f"Scanned {cycle_scanned} symbols | Skipped: {cycle_skipped}")
+
+    if cycle_trades > 0:
+        lines.append(f"*{cycle_trades} new trade(s) this cycle*")
+    else:
+        lines.append("No new trades this cycle")
+
+    # Show open positions with live P&L
+    if open_positions:
+        lines.append(f"\n*Open Positions ({open_count}):*")
+        total_target = 0.0
+        for pos in open_positions:
+            sym    = pos["symbol"]
+            entry  = pos["entry_price"]
+            sl     = pos["stop_loss"] or 0
+            tp     = pos["take_profit"] or 0
+            cost   = pos["cost"] or 0
+            price  = _get_price(sym) or entry
+            pnl    = (price - entry) * pos["quantity"]
+            pnl_pct = (price / entry - 1) * 100 if entry > 0 else 0
+            tp_gain = (tp / entry - 1) * 100 if entry > 0 else 0
+            tp_profit = (tp - entry) * pos["quantity"]
+            total_target += tp_profit
+            arrow = "▲" if pnl >= 0 else "▼"
+            lines.append(
+                f"  • *{sym}*: {arrow} {pnl:+.2f} ({pnl_pct:+.1f}%)  "
+                f"| TP: {fmt_price(tp)} (+{tp_gain:.0f}%)"
+            )
+        lines.append(f"\n💰 *Total profit if all TPs hit: +${total_target:.2f}*")
+    else:
+        lines.append("No open positions.")
+
+    summary = "\n".join(lines)
     for chat_id in _watched:
         await _notify(chat_id, summary)
 
 
+def _est_days_to_tp(asset_class: str, tp_pct: float) -> str:
+    """Estimate how many days to reach take profit based on typical daily volatility."""
+    daily_move = {"meme": 8.0, "crypto": 3.0, "stock": 1.5, "commodity": 1.2, "forex": 0.5}
+    avg = daily_move.get(asset_class, 1.5)
+    days = tp_pct / avg
+    if days < 1:
+        return "hours to ~1 day"
+    elif days < 3:
+        return f"~{days:.0f}-{days+1:.0f} days"
+    elif days < 14:
+        return f"~{days:.0f} days"
+    else:
+        return f"~{days/7:.1f} weeks"
+
+
 def _format_buy_msg(trade: dict, pred: dict) -> str:
     from utils.formatters import fmt_price
-    sl_pct    = trade.get("sl_pct", 0.05) * 100
-    tp_pct    = trade.get("tp_pct", 0.12) * 100
-    cls       = trade.get("asset_class", "").title()
-    sent      = pred.get("sentiment", 0)
-    mult      = trade.get("size_mult", 1.0)
-    warnings  = trade.get("warnings", [])
+    sl_pct   = trade.get("sl_pct", 0.05) * 100
+    tp_pct   = trade.get("tp_pct", 0.12) * 100
+    cls      = trade.get("asset_class", "").title()
+    sent     = pred.get("sentiment", 0)
+    mult     = trade.get("size_mult", 1.0)
+    warnings = trade.get("warnings", [])
+    cost     = trade.get("cost", 0)
+    qty      = trade.get("quantity", 0)
+    entry    = trade.get("price", 0)
+    sl       = trade.get("stop_loss", 0)
+    tp       = trade.get("take_profit", 0)
+
+    # $ amounts
+    tp_profit  = (tp - entry) * qty if tp and entry else cost * (tp_pct / 100)
+    sl_risk    = (entry - sl) * qty if sl and entry else cost * (sl_pct / 100)
+    rr_ratio   = tp_profit / sl_risk if sl_risk > 0 else 0
+    est_time   = _est_days_to_tp(cls.lower(), tp_pct)
 
     sent_note = ("Strong positive news" if sent > 0.2 else
                  "Mild positive news"   if sent > 0.1 else
@@ -398,20 +455,23 @@ def _format_buy_msg(trade: dict, pred: dict) -> str:
                  "Neutral")
 
     lines = [
-        f"*Auto-Trade: BUY Executed*",
+        f"📈 *New Trade Opened*",
         f"",
-        f"Symbol: *{trade['symbol']}* ({cls})",
-        f"Price: {fmt_price(trade['price'])}",
-        f"Quantity: {trade['quantity']:.6f}",
-        f"Cost: {fmt_price(trade['cost'])}  (size factor: {mult:.2f}x)",
-        f"Stop Loss: {fmt_price(trade['stop_loss'])} (-{sl_pct:.0f}%)",
-        f"Take Profit: {fmt_price(trade['take_profit'])} (+{tp_pct:.0f}%)",
-        f"ML Confidence: *{trade['confidence']*100:.1f}%*",
-        f"Sentiment: {sent:+.3f} — {sent_note}",
-        f"Trailing stop: active",
+        f"*{trade['symbol']}* ({cls})",
+        f"Entry Price:  {fmt_price(entry)}",
+        f"Position Size: {fmt_price(cost)} ({qty:.6f} units)",
+        f"",
+        f"🎯 *Take Profit:* {fmt_price(tp)} (+{tp_pct:.0f}%) → *+${tp_profit:.2f} profit*",
+        f"🛑 *Stop Loss:*   {fmt_price(sl)} (-{sl_pct:.0f}%) → *-${sl_risk:.2f} risk*",
+        f"⚖️ Risk/Reward:  1 : {rr_ratio:.1f}",
+        f"⏱ Est. close:   {est_time}",
+        f"",
+        f"🤖 ML Confidence: *{trade['confidence']*100:.1f}%*",
+        f"📰 Sentiment: {sent:+.3f} — {sent_note}",
+        f"🔒 Trailing stop: active (locks profit as price rises)",
     ]
     if warnings:
-        lines.append(f"Notes: {'; '.join(warnings)}")
+        lines.append(f"⚠️ Notes: {'; '.join(warnings)}")
     return "\n".join(lines)
 
 
