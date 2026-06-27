@@ -92,34 +92,71 @@ def _fetch_yfinance_ohlcv(symbol: str, period: str = "5y") -> pd.DataFrame | Non
         return None
 
 
+def _fetch_hourly_ohlcv(symbol: str) -> pd.DataFrame | None:
+    """Fetch 60 days of 1-hour candles for stocks/forex/commodities."""
+    import yfinance as yf
+    try:
+        from config import COMMODITY_SYMBOLS
+        sym = symbol.upper()
+        ticker_sym = COMMODITY_SYMBOLS.get(sym, sym)
+        if len(sym) == 6 and sym.isalpha() and ticker_sym == sym:
+            ticker_sym = sym + "=X"
+        df = yf.Ticker(ticker_sym).history(period="60d", interval="1h")
+        if df is None or df.empty or len(df) < 50:
+            return None
+        return df[["Open", "High", "Low", "Close", "Volume"]]
+    except Exception:
+        return None
+
+
+def _fetch_hourly_crypto(symbol: str) -> pd.DataFrame | None:
+    """Fetch 60 days of 1-hour candles for crypto via yfinance."""
+    import yfinance as yf
+    sym = symbol.upper()
+    for ticker in [f"{sym}-USD", f"{sym}USD=X"]:
+        try:
+            df = yf.Ticker(ticker).history(period="60d", interval="1h")
+            if df is not None and not df.empty and len(df) >= 50:
+                return df[["Open", "High", "Low", "Close", "Volume"]]
+        except Exception:
+            continue
+    return None
+
+
 def fetch_training_data(symbol: str, days: int = 500) -> pd.DataFrame | None:
     """
     Fetch OHLCV training data for any symbol.
-    Priority for crypto: yfinance (SYMBOL-USD) → CoinGecko fallback
-    Priority for others: yfinance stocks/forex/commodity
+    Uses 1-hour candles (60 days) for intraday signals — falls back to daily if unavailable.
     """
     from config import CRYPTO_IDS
     sym = symbol.upper()
 
     if sym in CRYPTO_IDS:
-        # 1. Try yfinance first — no rate limits, long history
+        # 1. Try hourly first (best for intraday trading)
+        df = _fetch_hourly_crypto(sym)
+        if df is not None and len(df) >= 50:
+            return df
+        # 2. Fall back to daily
         df = _fetch_yfinance_crypto(sym)
         if df is not None and len(df) >= 80:
             return df
-        # 2. Fall back to CoinGecko
+        # 3. CoinGecko as last resort
         df = _fetch_coingecko_ohlcv(sym, days)
         if df is not None and len(df) >= 80:
             return df
         return None
 
-    # Stocks, forex, commodities
+    # Stocks, forex, commodities — hourly first
+    df = _fetch_hourly_ohlcv(sym)
+    if df is not None and len(df) >= 50:
+        return df
     return _fetch_yfinance_ohlcv(sym, "5y")
 
 
 # ── Main training function ────────────────────────────────────────────────────
 
 def train_symbol(symbol: str, days: int = 500,
-                 horizon_days: int = 3,
+                 horizon_days: int = 4,
                  threshold: float = 0.01,
                  progress_callback=None) -> dict:
     """

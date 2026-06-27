@@ -91,7 +91,7 @@ def timeframe_aligned(symbol: str, daily_signal: str) -> tuple[bool, str]:
 
 def check_stale_positions() -> list[dict]:
     """
-    Find positions open > 5 days with no meaningful movement (between -1% and +1.5%).
+    Find positions open > 24 hours with no meaningful movement (between -0.3% and +0.5%).
     These are dead money — free the cash for better opportunities.
     Returns list of {symbol, profit_pct, days_open, reason}
     """
@@ -115,7 +115,7 @@ def check_stale_positions() -> list[dict]:
             except Exception:
                 continue
 
-            if days_open < 5:
+            if days_open < 1:
                 continue
 
             price = _get_price(pos["symbol"])
@@ -125,7 +125,7 @@ def check_stale_positions() -> list[dict]:
             entry = pos["entry_price"]
             profit_pct = (price / entry - 1) * 100
 
-            if -1.0 <= profit_pct <= 1.5:
+            if -0.3 <= profit_pct <= 0.5:
                 stale.append({
                     "symbol":     pos["symbol"],
                     "profit_pct": profit_pct,

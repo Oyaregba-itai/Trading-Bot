@@ -24,11 +24,11 @@ MIN_CASH_RESERVE = 500.0  # Always keep $500 in cash
 # Stocks & commodities in between
 
 _VOLATILITY = {
-    "meme":      {"sl": 0.10, "tp": 0.25, "size": 0.15},  # -10% / +25% / 15% of equity
-    "crypto":    {"sl": 0.07, "tp": 0.15, "size": 0.20},  # -7%  / +15% / 20%
-    "forex":     {"sl": 0.02, "tp": 0.05, "size": 0.20},  # -2%  / +5%  / 20%
-    "stock":     {"sl": 0.05, "tp": 0.12, "size": 0.20},  # -5%  / +12% / 20%
-    "commodity": {"sl": 0.05, "tp": 0.10, "size": 0.20},  # -5%  / +10% / 20%
+    "meme":      {"sl": 0.04,  "tp": 0.08,  "size": 0.15},  # -4%   / +8%   / intraday
+    "crypto":    {"sl": 0.015, "tp": 0.03,  "size": 0.20},  # -1.5% / +3%
+    "forex":     {"sl": 0.003, "tp": 0.006, "size": 0.20},  # -0.3% / +0.6%
+    "stock":     {"sl": 0.010, "tp": 0.020, "size": 0.20},  # -1%   / +2%
+    "commodity": {"sl": 0.010, "tp": 0.020, "size": 0.20},  # -1%   / +2%
 }
 
 # Trailing stop tiers: when price rises X%, move stop to Y% above entry

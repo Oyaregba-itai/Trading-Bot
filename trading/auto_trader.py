@@ -280,8 +280,8 @@ async def run_trading_cycle(app=None):
             n   = meta.get("n_samples", 0) or 0
             acc = meta.get("accuracy", 0) or 0
             rec = meta.get("recall_s", 0) or 0
-            if (acc > 0.75 and n < 500) or (rec < 0.10 and acc > 0.70):
-                logger.info("Skipping %s — overfit model (acc=%.1f%%, n=%d)", symbol, acc*100, n)
+            if acc > 0.82 or (acc > 0.72 and n < 300) or (rec < 0.15 and acc > 0.68):
+                logger.info("Skipping %s — overfit model (acc=%.1f%%, n=%d, rec=%.2f)", symbol, acc*100, n, rec)
                 cycle_skipped += 1
                 continue
 
@@ -415,18 +415,18 @@ async def run_trading_cycle(app=None):
 
 
 def _est_days_to_tp(asset_class: str, tp_pct: float) -> str:
-    """Estimate how many days to reach take profit based on typical daily volatility."""
-    daily_move = {"meme": 8.0, "crypto": 3.0, "stock": 1.5, "commodity": 1.2, "forex": 0.5}
-    avg = daily_move.get(asset_class, 1.5)
-    days = tp_pct / avg
-    if days < 1:
-        return "hours to ~1 day"
-    elif days < 3:
-        return f"~{days:.0f}-{days+1:.0f} days"
-    elif days < 14:
-        return f"~{days:.0f} days"
+    """Estimate time to reach take profit based on typical hourly volatility."""
+    hourly_move = {"meme": 0.35, "crypto": 0.12, "stock": 0.06, "commodity": 0.05, "forex": 0.015}
+    avg = hourly_move.get(asset_class, 0.06)
+    hours = tp_pct / avg
+    if hours < 4:
+        return f"~{max(1,int(hours))}-{int(hours)+2} hours"
+    elif hours < 24:
+        return f"~{int(hours)} hours"
+    elif hours < 48:
+        return "~1-2 days"
     else:
-        return f"~{days/7:.1f} weeks"
+        return f"~{hours/24:.0f} days"
 
 
 def _format_buy_msg(trade: dict, pred: dict) -> str:
