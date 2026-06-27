@@ -324,6 +324,8 @@ async def run_trading_cycle(app=None):
 
             trade = execute_buy(symbol, asset_type, price, confidence, signal,
                                 sentiment=sentiment_score * fund_mult)
+            if not trade:
+                cycle_skipped += 1
             if trade:
                 # For crypto symbols, also place real order on Binance Testnet
                 binance_note = ""

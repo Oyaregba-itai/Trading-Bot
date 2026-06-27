@@ -284,7 +284,7 @@ def main():
             async def _bg_train():
                 from ml.trainer import train_symbol
                 import concurrent.futures
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 ok, err = [], []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     for sym in ALL_SYMBOLS:
