@@ -126,7 +126,7 @@ async def cmd_autotrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show current demo wallet state."""
-    # Try to get live prices
+    import math
     prices = {}
     try:
         from database import get_all_positions
@@ -134,7 +134,7 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for p in positions:
             from handlers.portfolio_handlers import _get_current_price
             price = _get_current_price(p["symbol"], p["asset_type"])
-            if price:
+            if price and not math.isnan(price) and price > 0:
                 prices[p["symbol"]] = price
     except Exception:
         pass
@@ -142,14 +142,18 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     portfolio = get_portfolio_value(prices if prices else None)
     initial = __import__("database").get_initial()
     equity = portfolio["total_equity"]
-    total_return = (equity / initial - 1) * 100
+
+    # Guard against nan equity (all prices unavailable)
+    if not equity or math.isnan(equity):
+        equity = portfolio["cash"]
+    total_return = (equity / initial - 1) * 100 if initial else 0
 
     arrow = "▲" if total_return >= 0 else "▼"
     lines = [
         f"*Demo Wallet*",
         f"",
         f"Cash:      {fmt_price(portfolio['cash'])}",
-        f"Positions: {fmt_price(portfolio['positions_value'])}",
+        f"Positions: {fmt_price(portfolio['positions_value']) if not math.isnan(portfolio['positions_value']) else 'price unavailable'}",
         f"Total:     *{fmt_price(equity)}*",
         f"Return:    {arrow} {abs(total_return):.2f}%",
         "",
@@ -158,13 +162,25 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if portfolio["positions"]:
         lines.append("*Open Positions*")
         for p in portfolio["positions"]:
-            arrow2 = "▲" if p["pnl"] >= 0 else "▼"
-            lines.append(
-                f"  *{p['symbol']}*  {fmt_price(p['current_price'])}\n"
-                f"  Qty: {p['quantity']:.6f}  |  Entry: {fmt_price(p['entry_price'])}\n"
-                f"  P&L: {arrow2} {fmt_price(abs(p['pnl']))} ({p['pnl_pct']:+.2f}%)\n"
-                f"  SL: {fmt_price(p['stop_loss'])}  TP: {fmt_price(p['take_profit'])}"
-            )
+            cur = p["current_price"]
+            pnl = p["pnl"]
+            pnl_pct = p["pnl_pct"]
+            if math.isnan(cur) or cur <= 0:
+                # Weekend / market closed — show entry price with note
+                lines.append(
+                    f"  *{p['symbol']}*  (market closed)\n"
+                    f"  Qty: {p['quantity']:.6f}  |  Entry: {fmt_price(p['entry_price'])}\n"
+                    f"  P&L: — (price unavailable)\n"
+                    f"  SL: {fmt_price(p['stop_loss'])}  TP: {fmt_price(p['take_profit'])}"
+                )
+            else:
+                arrow2 = "▲" if pnl >= 0 else "▼"
+                lines.append(
+                    f"  *{p['symbol']}*  {fmt_price(cur)}\n"
+                    f"  Qty: {p['quantity']:.6f}  |  Entry: {fmt_price(p['entry_price'])}\n"
+                    f"  P&L: {arrow2} {fmt_price(abs(pnl))} ({pnl_pct:+.2f}%)\n"
+                    f"  SL: {fmt_price(p['stop_loss'])}  TP: {fmt_price(p['take_profit'])}"
+                )
     else:
         lines.append("No open positions.")
 

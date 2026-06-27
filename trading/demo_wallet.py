@@ -129,8 +129,11 @@ def get_portfolio_value(prices: dict | None = None) -> dict:
     pos_details = []
 
     for pos in positions:
+        import math
         sym     = pos["symbol"]
         current = (prices or {}).get(sym, pos["entry_price"])
+        if current is None or (isinstance(current, float) and math.isnan(current)):
+            current = pos["entry_price"]
         value   = current * pos["quantity"]
         cost    = pos["cost"]
         pnl     = value - cost
