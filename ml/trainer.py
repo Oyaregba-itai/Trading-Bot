@@ -119,7 +119,7 @@ def fetch_training_data(symbol: str, days: int = 500) -> pd.DataFrame | None:
 # ── Main training function ────────────────────────────────────────────────────
 
 def train_symbol(symbol: str, days: int = 500,
-                 horizon_days: int = 1,
+                 horizon_days: int = 3,
                  threshold: float = 0.01,
                  progress_callback=None) -> dict:
     """

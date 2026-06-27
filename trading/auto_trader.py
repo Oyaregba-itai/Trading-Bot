@@ -280,8 +280,8 @@ async def run_trading_cycle(app=None):
             n   = meta.get("n_samples", 0) or 0
             acc = meta.get("accuracy", 0) or 0
             rec = meta.get("recall_s", 0) or 0
-            if (acc > 0.75 and n < 200) or (rec < 0.10 and acc > 0.75):
-                logger.info("Skipping %s — overfit model", symbol)
+            if (acc > 0.75 and n < 500) or (rec < 0.10 and acc > 0.70):
+                logger.info("Skipping %s — overfit model (acc=%.1f%%, n=%d)", symbol, acc*100, n)
                 cycle_skipped += 1
                 continue
 
