@@ -102,7 +102,7 @@ async def cmd_autotrade(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines += [
             f"\nStarting wallet: $10,000",
             f"Position size: 20% per trade",
-            f"Stop loss: -5% | Take profit: +12%",
+            f"Stop loss: -1 to -4% | Take profit: +2 to +8% (intraday)",
             f"Min ML confidence: 60%\n",
             f"Position monitor every *2 minutes* (SL/TP/exits). New trades every *15 minutes*. Notifies on every trade.\n",
             f"_Train new symbols with `/train GOLD`, `/train GBPUSD` etc._",
