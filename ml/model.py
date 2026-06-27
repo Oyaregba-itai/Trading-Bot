@@ -10,7 +10,9 @@ import joblib
 import numpy as np
 import pandas as pd
 
-MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+# Use Railway persistent volume if available, otherwise local models/ folder
+_DATA_DIR  = "/app/data" if os.path.isdir("/app/data") else os.path.dirname(os.path.dirname(__file__))
+MODELS_DIR = os.path.join(_DATA_DIR, "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 

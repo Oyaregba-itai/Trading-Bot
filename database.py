@@ -2,7 +2,9 @@ import sqlite3
 import os
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "trading_bot.db")
+# Use Railway persistent volume if available, otherwise local directory
+_DATA_DIR = "/app/data" if os.path.isdir("/app/data") else os.path.dirname(__file__)
+DB_PATH = os.path.join(_DATA_DIR, "trading_bot.db")
 INITIAL_BALANCE = 10_000.0
 
 
