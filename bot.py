@@ -148,35 +148,29 @@ async def auto_retrain(app: Application):
             except Exception:
                 pass
 
+    TIMEFRAMES = ["5m", "1h", "1d"]
+    total = len(ALL_SYMBOLS) * len(TIMEFRAMES)
+
     def _run():
-        logger.info("Auto-retraining all %d models…", len(ALL_SYMBOLS))
+        logger.info("Auto-retraining %d symbols × 3 timeframes = %d models…", len(ALL_SYMBOLS), total)
         if notify_chats:
-            _notify_chats(f"*Nightly Retraining Started*\n\nRetraining all {len(ALL_SYMBOLS)} models with latest market data.\nThis takes ~10 minutes — you'll get a summary when done.")
+            _notify_chats(f"*Nightly Retraining Started*\n\nRetraining {len(ALL_SYMBOLS)} symbols × 3 timeframes ({total} models) with latest market data.\nThis takes ~30 minutes — you'll get a summary when done.")
         results = []
         for sym in ALL_SYMBOLS:
-            try:
-                r = train_symbol(sym)
-                results.append(r)
-            except Exception as e:
-                results.append({"symbol": sym, "error": str(e)})
+            for tf in TIMEFRAMES:
+                try:
+                    r = train_symbol(sym, timeframe=tf)
+                    results.append(r)
+                except Exception as e:
+                    results.append({"symbol": sym, "timeframe": tf, "error": str(e)})
 
         ok  = [r for r in results if "error" not in r]
         err = [r for r in results if "error" in r]
 
-        # Safe accuracy formatting — guard against missing key
-        ok_lines = ""
-        for r in ok:
-            acc = r.get("accuracy")
-            if acc is not None:
-                ok_lines += f"  • {r['symbol']}: {acc*100:.1f}%\n"
-            else:
-                ok_lines += f"  • {r['symbol']}: trained\n"
-
         summary = (
             f"*Nightly Retraining Complete*\n\n"
-            f"✅ {len(ok)}/{len(ALL_SYMBOLS)} models updated\n"
-            + ok_lines
-            + (f"\n❌ {len(err)} failed: {', '.join(r['symbol'] for r in err)}" if err else "")
+            f"✅ {len(ok)}/{total} models updated (5m + 1h + 1d)\n"
+            + (f"\n❌ {len(err)} failed" if err else "All timeframes ready.")
         )
         logger.info("Auto-retraining done: %d ok, %d failed", len(ok), len(err))
         if notify_chats:
@@ -262,16 +256,22 @@ def main():
 
         chat_id = int(os.environ.get("DEFAULT_CHAT_ID", "0"))
 
-        # Check how many models exist
+        # Check which symbol+timeframe combos are missing
+        TIMEFRAMES = ["5m", "1h", "1d"]
         trained = {r["symbol"] for r in (get_all_models() or [])}
-        missing = [s for s in ALL_SYMBOLS if s not in trained]
+        missing_combos = [
+            (sym, tf) for sym in ALL_SYMBOLS for tf in TIMEFRAMES
+            if f"{sym}_{tf}" not in trained
+        ]
 
         if chat_id and _watched:
             sym_count = sum(len(v) for v in _watched.values())
             try:
-                status = "Auto-trading ON."
-                if missing:
-                    status = f"Models missing ({len(missing)}/{len(ALL_SYMBOLS)}) — auto-training now in background. Trading starts after training."
+                status = "Auto-trading ON — all 3 timeframes ready."
+                if missing_combos:
+                    n_sym = len({s for s, _ in missing_combos})
+                    status = (f"Models missing ({len(missing_combos)} combos across {n_sym} symbols) "
+                              f"— auto-training 5m/1h/1d in background. Trading starts after training.")
                 await application.bot.send_message(
                     chat_id=chat_id,
                     text=f"Bot restarted and is ACTIVE\nWatching {sym_count} symbols. {status}"
@@ -279,26 +279,30 @@ def main():
             except Exception:
                 pass
 
-        # If models are missing, auto-train in background without blocking startup
-        if missing:
+        # If any timeframe models are missing, auto-train in background
+        if missing_combos:
             async def _bg_train():
                 from ml.trainer import train_symbol
                 import concurrent.futures
                 loop = asyncio.get_running_loop()
                 ok, err = [], []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    for sym in ALL_SYMBOLS:
+                    for sym, tf in missing_combos:
                         try:
-                            r = await loop.run_in_executor(pool, train_symbol, sym)
+                            r = await loop.run_in_executor(
+                                pool, lambda s=sym, t=tf: train_symbol(s, timeframe=t)
+                            )
                             ok.append(r)
                         except Exception as e:
-                            err.append(sym)
-                            logger.error("Startup train failed %s: %s", sym, e)
+                            err.append(f"{sym}/{tf}")
+                            logger.error("Startup train failed %s/%s: %s", sym, tf, e)
+                total_syms = len({r.get("symbol","?") for r in ok})
                 summary = (
                     f"Auto-Training Complete\n\n"
-                    f"{len(ok)}/{len(ALL_SYMBOLS)} models trained\n"
-                    + (f"Failed: {', '.join(err)}" if err else "All models ready.")
-                    + "\n\nAuto-trading is now fully active."
+                    f"{len(ok)}/{len(missing_combos)} models trained "
+                    f"(5m + 1h + 1d across {total_syms} symbols)\n"
+                    + (f"Failed: {', '.join(err)}" if err else "All timeframes ready.")
+                    + "\n\nAuto-trading is now fully active with multi-timeframe confluence."
                 )
                 if chat_id:
                     try:
