@@ -24,11 +24,27 @@ MIN_CASH_RESERVE = 500.0  # Always keep $500 in cash
 # Stocks & commodities in between
 
 _VOLATILITY = {
-    "meme":      {"sl": 0.04,  "tp": 0.08,  "size": 0.15},  # -4%   / +8%   / intraday
-    "crypto":    {"sl": 0.015, "tp": 0.03,  "size": 0.20},  # -1.5% / +3%
-    "forex":     {"sl": 0.003, "tp": 0.006, "size": 0.20},  # -0.3% / +0.6%
-    "stock":     {"sl": 0.010, "tp": 0.020, "size": 0.20},  # -1%   / +2%
-    "commodity": {"sl": 0.010, "tp": 0.020, "size": 0.20},  # -1%   / +2%
+    "5m": {
+        "meme":      {"sl": 0.005, "tp": 0.010, "size": 0.10},
+        "crypto":    {"sl": 0.003, "tp": 0.006, "size": 0.15},
+        "forex":     {"sl": 0.001, "tp": 0.002, "size": 0.20},
+        "stock":     {"sl": 0.002, "tp": 0.004, "size": 0.15},
+        "commodity": {"sl": 0.002, "tp": 0.004, "size": 0.15},
+    },
+    "1h": {
+        "meme":      {"sl": 0.04,  "tp": 0.08,  "size": 0.15},
+        "crypto":    {"sl": 0.015, "tp": 0.03,  "size": 0.20},
+        "forex":     {"sl": 0.003, "tp": 0.006, "size": 0.20},
+        "stock":     {"sl": 0.010, "tp": 0.020, "size": 0.20},
+        "commodity": {"sl": 0.010, "tp": 0.020, "size": 0.20},
+    },
+    "1d": {
+        "meme":      {"sl": 0.08,  "tp": 0.16,  "size": 0.15},
+        "crypto":    {"sl": 0.04,  "tp": 0.08,  "size": 0.20},
+        "forex":     {"sl": 0.010, "tp": 0.020, "size": 0.20},
+        "stock":     {"sl": 0.030, "tp": 0.060, "size": 0.20},
+        "commodity": {"sl": 0.025, "tp": 0.050, "size": 0.20},
+    },
 }
 
 # Trailing stop tiers: when price rises X%, move stop to Y% above entry
@@ -50,10 +66,12 @@ def _asset_class(symbol: str) -> str:
     return "stock"
 
 
-def _trade_params(symbol: str, sentiment: float, confidence: float, equity: float) -> dict:
+def _trade_params(symbol: str, sentiment: float, confidence: float, equity: float,
+                  timeframe: str = "1h") -> dict:
     """Return position size (cash), stop loss price multiplier, take profit multiplier."""
     cls    = _asset_class(symbol)
-    preset = _VOLATILITY.get(cls, _VOLATILITY["stock"])
+    tf_map = _VOLATILITY.get(timeframe, _VOLATILITY["1h"])
+    preset = tf_map.get(cls, tf_map["stock"])
 
     base_size = preset["size"]
 
@@ -164,7 +182,7 @@ def get_portfolio_value(prices: dict | None = None) -> dict:
 
 def execute_buy(symbol: str, asset_type: str, current_price: float,
                 confidence: float, signal: str = "BUY",
-                sentiment: float = 0.0) -> dict | None:
+                sentiment: float = 0.0, timeframe: str = "1h") -> dict | None:
     """
     Execute a smart paper buy with all market filters applied.
     """
@@ -194,7 +212,7 @@ def execute_buy(symbol: str, asset_type: str, current_price: float,
     portfolio = get_portfolio_value()
     equity    = portfolio["total_equity"]
 
-    params    = _trade_params(symbol, sentiment, confidence, equity)
+    params    = _trade_params(symbol, sentiment, confidence, equity, timeframe)
     available = cash - MIN_CASH_RESERVE
     if available < 10:
         return None
@@ -231,6 +249,7 @@ def execute_buy(symbol: str, asset_type: str, current_price: float,
         "asset_class": params["asset_class"],
         "size_mult":   filters["size_mult"],
         "warnings":    filters["warnings"],
+        "timeframe":   timeframe,
     }
 
 

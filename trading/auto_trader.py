@@ -249,43 +249,67 @@ async def run_trading_cycle(app=None):
             cycle_trades += 1
             continue
 
-        # 2. Get sentiment + ML prediction
+        # 2. Get sentiment
         try:
             sentiment_result = aggregate_sentiment(symbol, log_to_db=True)
             sentiment_score = sentiment_result.composite
         except Exception:
             sentiment_score = 0.0
 
-        try:
-            pred = predict_symbol(symbol, sentiment_score, fear_greed)
-        except Exception as e:
-            logger.error("Prediction error %s: %s", symbol, e)
-            cycle_skipped += 1
-            continue
-
-        if "error" in pred:
-            cycle_skipped += 1
-            continue
-
         # Block stablecoins
         from config import STABLECOIN_SYMBOLS
         if symbol in STABLECOIN_SYMBOLS:
             continue
 
-        # Block unreliable models
+        # 3. Collect signals from all available timeframes
         from database import get_model_meta, get_position
-        meta = get_model_meta(symbol)
-        if meta:
+        TIMEFRAMES = ["5m", "1h", "1d"]
+        tf_signals: dict[str, dict] = {}
+        for tf in TIMEFRAMES:
+            meta = get_model_meta(symbol, tf)
+            if not meta:
+                continue
             meta = dict(meta)
             n   = meta.get("n_samples", 0) or 0
             acc = meta.get("accuracy", 0) or 0
             rec = meta.get("recall_s", 0) or 0
             if acc > 0.82 or (acc > 0.72 and n < 300) or (rec < 0.15 and acc > 0.68):
-                logger.info("Skipping %s — overfit model (acc=%.1f%%, n=%d, rec=%.2f)", symbol, acc*100, n, rec)
-                cycle_skipped += 1
+                logger.info("Skipping %s %s — overfit (acc=%.1f%%, n=%d)", symbol, tf, acc*100, n)
                 continue
+            try:
+                p = predict_symbol(symbol, sentiment_score, fear_greed, timeframe=tf)
+                if "error" not in p:
+                    tf_signals[tf] = p
+            except Exception as e:
+                logger.error("Prediction error %s %s: %s", symbol, tf, e)
 
-        signal     = pred["signal"]
+        if not tf_signals:
+            cycle_skipped += 1
+            continue
+
+        # Confluence: count agreements
+        buy_tfs  = [tf for tf, p in tf_signals.items() if p["signal"] == "BUY"]
+        sell_tfs = [tf for tf, p in tf_signals.items() if p["signal"] == "SELL"]
+
+        n_avail = len(tf_signals)
+        if n_avail >= 2:
+            if len(buy_tfs) >= 2:
+                signal = "BUY"
+            elif len(sell_tfs) >= 2:
+                signal = "SELL"
+            else:
+                cycle_skipped += 1
+                continue  # Timeframes disagree — skip
+        else:
+            # Only 1 timeframe trained — use it directly
+            signal = next(iter(tf_signals.values()))["signal"]
+
+        # Pick best timeframe for this direction (highest confidence)
+        agree_tfs = buy_tfs if signal == "BUY" else sell_tfs
+        if not agree_tfs:
+            agree_tfs = list(tf_signals.keys())
+        best_tf   = max(agree_tfs, key=lambda tf: tf_signals[tf]["confidence"])
+        pred       = tf_signals[best_tf]
         confidence = pred["confidence"]
         asset_type = _asset_type(symbol)
 
@@ -323,7 +347,7 @@ async def run_trading_cycle(app=None):
             fund_mult = funding_rate_size_mult(symbol, signal)
 
             trade = execute_buy(symbol, asset_type, price, confidence, signal,
-                                sentiment=sentiment_score * fund_mult)
+                                sentiment=sentiment_score * fund_mult, timeframe=best_tf)
             if not trade:
                 cycle_skipped += 1
             if trade:
@@ -414,19 +438,27 @@ async def run_trading_cycle(app=None):
         await _notify(chat_id, summary)
 
 
-def _est_days_to_tp(asset_class: str, tp_pct: float) -> str:
-    """Estimate time to reach take profit based on typical hourly volatility."""
-    hourly_move = {"meme": 0.35, "crypto": 0.12, "stock": 0.06, "commodity": 0.05, "forex": 0.015}
-    avg = hourly_move.get(asset_class, 0.06)
-    hours = tp_pct / avg
-    if hours < 4:
-        return f"~{max(1,int(hours))}-{int(hours)+2} hours"
-    elif hours < 24:
-        return f"~{int(hours)} hours"
-    elif hours < 48:
-        return "~1-2 days"
-    else:
-        return f"~{hours/24:.0f} days"
+def _est_days_to_tp(asset_class: str, tp_pct: float, timeframe: str = "1h") -> str:
+    """Estimate time to reach take profit based on timeframe volatility."""
+    moves = {
+        "5m": {"meme": 0.05, "crypto": 0.02, "stock": 0.01, "commodity": 0.008, "forex": 0.003},
+        "1h": {"meme": 0.35, "crypto": 0.12, "stock": 0.06, "commodity": 0.05,  "forex": 0.015},
+        "1d": {"meme": 8.0,  "crypto": 3.0,  "stock": 1.5,  "commodity": 1.2,   "forex": 0.5},
+    }
+    per_period = moves.get(timeframe, moves["1h"]).get(asset_class, 0.06)
+    periods = tp_pct / per_period
+    if timeframe == "5m":
+        mins = periods * 5
+        return f"~{int(mins)} min" if mins < 60 else f"~{mins/60:.0f} hrs"
+    elif timeframe == "1h":
+        if periods < 4:   return f"~{max(1,int(periods))}-{int(periods)+2} hours"
+        elif periods < 24: return f"~{int(periods)} hours"
+        elif periods < 48: return "~1-2 days"
+        else:              return f"~{periods/24:.0f} days"
+    else:  # 1d
+        if periods < 1:  return "hours to ~1 day"
+        elif periods < 3: return f"~{periods:.0f}-{periods+1:.0f} days"
+        else:             return f"~{periods:.0f} days"
 
 
 def _format_buy_msg(trade: dict, pred: dict) -> str:
@@ -434,6 +466,7 @@ def _format_buy_msg(trade: dict, pred: dict) -> str:
     sl_pct   = trade.get("sl_pct", 0.05) * 100
     tp_pct   = trade.get("tp_pct", 0.12) * 100
     cls      = trade.get("asset_class", "").title()
+    tf       = trade.get("timeframe", "1h")
     sent     = pred.get("sentiment", 0)
     mult     = trade.get("size_mult", 1.0)
     warnings = trade.get("warnings", [])
@@ -447,7 +480,8 @@ def _format_buy_msg(trade: dict, pred: dict) -> str:
     tp_profit  = (tp - entry) * qty if tp and entry else cost * (tp_pct / 100)
     sl_risk    = (entry - sl) * qty if sl and entry else cost * (sl_pct / 100)
     rr_ratio   = tp_profit / sl_risk if sl_risk > 0 else 0
-    est_time   = _est_days_to_tp(cls.lower(), tp_pct)
+    est_time   = _est_days_to_tp(cls.lower(), tp_pct, tf)
+    tf_label   = {"5m": "Scalp (5-min)", "1h": "Intraday (1-hr)", "1d": "Swing (Daily)"}.get(tf, tf)
 
     sent_note = ("Strong positive news" if sent > 0.2 else
                  "Mild positive news"   if sent > 0.1 else
@@ -457,12 +491,12 @@ def _format_buy_msg(trade: dict, pred: dict) -> str:
     lines = [
         f"📈 *New Trade Opened*",
         f"",
-        f"*{trade['symbol']}* ({cls})",
+        f"*{trade['symbol']}* ({cls}) — _{tf_label}_",
         f"Entry Price:  {fmt_price(entry)}",
         f"Position Size: {fmt_price(cost)} ({qty:.6f} units)",
         f"",
-        f"🎯 *Take Profit:* {fmt_price(tp)} (+{tp_pct:.0f}%) → *+${tp_profit:.2f} profit*",
-        f"🛑 *Stop Loss:*   {fmt_price(sl)} (-{sl_pct:.0f}%) → *-${sl_risk:.2f} risk*",
+        f"🎯 *Take Profit:* {fmt_price(tp)} (+{tp_pct:.1f}%) → *+${tp_profit:.2f} profit*",
+        f"🛑 *Stop Loss:*   {fmt_price(sl)} (-{sl_pct:.1f}%) → *-${sl_risk:.2f} risk*",
         f"⚖️ Risk/Reward:  1 : {rr_ratio:.1f}",
         f"⏱ Est. close:   {est_time}",
         f"",

@@ -76,49 +76,49 @@ async def cmd_train(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Capture the running event loop BEFORE spawning the thread
     main_loop = asyncio.get_event_loop()
 
+    TIMEFRAMES = ["5m", "1h", "1d"]
+    total_models = len(symbols) * len(TIMEFRAMES)
+
     await update.message.reply_text(
-        f"Starting ML training for *{len(symbols)} symbols*:\n"
+        f"Starting ML training for *{len(symbols)} symbols × 3 timeframes* = {total_models} models:\n"
         f"{', '.join(symbols)}\n\n"
-        f"Training 1 symbol at a time. Updates will appear as each finishes.",
+        f"Timeframes: Scalp (5m) · Intraday (1h) · Swing (1d)\n"
+        f"Updates appear as each finishes.",
         parse_mode=ParseMode.MARKDOWN
     )
 
     def _send(coro):
-        """Thread-safe fire-and-forget message sender."""
         asyncio.run_coroutine_threadsafe(coro, main_loop)
 
     def run_training():
+        done = 0
         for i, sym in enumerate(symbols, 1):
-            # Send "starting symbol N/total" message
-            _send(update.message.reply_text(
-                f"*[{i}/{len(symbols)}] Training {sym}…*\n"
-                f"Fetching historical data…",
-                parse_mode=ParseMode.MARKDOWN
-            ))
+            tf_results = []
+            for tf in TIMEFRAMES:
+                done += 1
+                _send(update.message.reply_text(
+                    f"*[{done}/{total_models}] {sym} ({tf})…*",
+                    parse_mode=ParseMode.MARKDOWN
+                ))
+                result = train_symbol(sym, timeframe=tf)
+                tf_results.append(result)
 
-            last_step = [None]
-
-            def progress(msg, s=sym):
-                # Only send if the message is different (avoid spam)
-                if msg != last_step[0]:
-                    last_step[0] = msg
-                    _send(update.message.reply_text(
-                        f"*{s}* — {msg}",
-                        parse_mode=ParseMode.MARKDOWN
-                    ))
-
-            result = train_symbol(sym, progress_callback=progress)
-            _send(update.message.reply_text(
-                _format_train_result(result),
-                parse_mode=ParseMode.MARKDOWN
-            ))
+            # Summary for this symbol across all timeframes
+            lines = [f"*{sym} — Training Complete*", ""]
+            for r in tf_results:
+                tf = r.get("timeframe", "?")
+                if "error" in r:
+                    lines.append(f"`{tf}` — ❌ {r['error'][:50]}")
+                else:
+                    lines.append(f"`{tf}` — {r['accuracy']*100:.1f}% acc | {r['n_samples']} samples")
+            _send(update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN))
 
         _send(update.message.reply_text(
-            f"*All {len(symbols)} models trained!*\n\n"
-            "Now try:\n"
+            f"*All {len(symbols)} symbols trained across 3 timeframes!*\n\n"
+            "Bot now uses 5m + 1h + 1d confluence signals.\n"
             "• `/predict BTC` — live signal\n"
             "• `/accuracy` — model scores\n"
-            "• `/autotrade start` — start demo trading",
+            "• `/autotrade start` — start trading",
             parse_mode=ParseMode.MARKDOWN
         ))
 

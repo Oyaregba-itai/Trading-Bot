@@ -67,11 +67,12 @@ def _build_et(class_weight="balanced"):
 
 
 class TradingModel:
-    def __init__(self, symbol: str):
-        self.symbol = symbol.upper()
-        self.model = None           # final ensemble pipeline
+    def __init__(self, symbol: str, timeframe: str = "1h"):
+        self.symbol    = symbol.upper()
+        self.timeframe = timeframe
+        self.model     = None
         self.feature_names: list[str] = []
-        self.path = os.path.join(MODELS_DIR, f"{self.symbol}.joblib")
+        self.path = os.path.join(MODELS_DIR, f"{self.symbol}_{timeframe}.joblib")
 
     def train(self, X: pd.DataFrame, y: pd.Series) -> dict:
         from sklearn.model_selection import TimeSeriesSplit
@@ -162,8 +163,8 @@ class TradingModel:
             return False
 
     @classmethod
-    def load_for(cls, symbol: str) -> "TradingModel | None":
-        m = cls(symbol)
+    def load_for(cls, symbol: str, timeframe: str = "1h") -> "TradingModel | None":
+        m = cls(symbol, timeframe)
         return m if m.load() else None
 
 

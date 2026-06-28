@@ -226,19 +226,21 @@ def get_all_closed_trades() -> list:
 
 # ── Model registry helpers ────────────────────────────────────────────────────
 
-def save_model_meta(symbol, accuracy, precision_s, recall_s, f1_s, n_samples, model_path):
+def save_model_meta(symbol, accuracy, precision_s, recall_s, f1_s, n_samples, model_path, timeframe="1h"):
+    key = f"{symbol}_{timeframe}"
     with get_conn() as c:
         c.execute("""
             INSERT OR REPLACE INTO model_registry
             (symbol, accuracy, precision_s, recall_s, f1_s, n_samples, trained_at, model_path)
             VALUES (?,?,?,?,?,?,?,?)
-        """, (symbol, accuracy, precision_s, recall_s, f1_s, n_samples,
+        """, (key, accuracy, precision_s, recall_s, f1_s, n_samples,
               datetime.utcnow().isoformat(), model_path))
 
 
-def get_model_meta(symbol: str) -> sqlite3.Row | None:
+def get_model_meta(symbol: str, timeframe: str = "1h") -> sqlite3.Row | None:
+    key = f"{symbol}_{timeframe}"
     with get_conn() as c:
-        return c.execute("SELECT * FROM model_registry WHERE symbol=?", (symbol,)).fetchone()
+        return c.execute("SELECT * FROM model_registry WHERE symbol=?", (key,)).fetchone()
 
 
 def get_all_models() -> list:
