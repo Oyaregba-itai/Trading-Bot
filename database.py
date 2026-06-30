@@ -219,6 +219,14 @@ def get_trade_history(limit: int = 20) -> list:
         ).fetchall()
 
 
+def get_last_closed_trade(symbol: str) -> sqlite3.Row | None:
+    with get_conn() as c:
+        return c.execute(
+            "SELECT * FROM trade_history WHERE symbol=? ORDER BY closed_at DESC LIMIT 1",
+            (symbol,)
+        ).fetchone()
+
+
 def get_all_closed_trades() -> list:
     with get_conn() as c:
         return c.execute("SELECT * FROM trade_history WHERE exit_price IS NOT NULL").fetchall()

@@ -179,7 +179,8 @@ async def run_trading_cycle(app=None):
     from data.crypto import get_fear_greed
     from trading.smart_features import (daily_loss_limit_hit, check_stale_positions,
                                         timeframe_aligned, earnings_blackout,
-                                        funding_rate_size_mult, social_volume_spike)
+                                        funding_rate_size_mult, social_volume_spike,
+                                        reentry_cooldown_active)
     from utils.formatters import fmt_price
 
     _ensure_default_session()
@@ -327,6 +328,12 @@ async def run_trading_cycle(app=None):
 
         # 4. Open new position — run extra smart checks first
         if signal == "BUY" and confidence >= 0.60:
+
+            cooling, cool_reason = reentry_cooldown_active(symbol, best_tf)
+            if cooling:
+                logger.info("Skipping %s — %s", symbol, cool_reason)
+                cycle_skipped += 1
+                continue
 
             blacked_out, earn_reason = earnings_blackout(symbol)
             if blacked_out:

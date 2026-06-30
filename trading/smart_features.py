@@ -6,6 +6,7 @@ Advanced trading intelligence features:
   4. Earnings blackout (avoid stocks 2 days before earnings)
   5. Crypto funding rates (negative funding = bearish futures sentiment)
   6. Social volume spike (Reddit mention surge = something happening)
+  7. Re-entry cooldown (don't immediately re-buy a symbol that just stopped out)
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -291,3 +292,46 @@ def social_volume_spike(symbol: str) -> tuple[bool, str]:
         return False, f"{recent} posts/hour — normal"
     except Exception:
         return False, "unavailable"
+
+
+# ── 7. Re-entry Cooldown ──────────────────────────────────────────────────────
+
+# How long to wait before re-buying a symbol that just closed as a LOSS,
+# scaled to how fast that timeframe moves. Without this, a ranging market
+# near a support/resistance level causes immediate re-entry → re-stop-out
+# loops (e.g. USDCAD or AVAX getting stopped out 3x in a row at the same price).
+_COOLDOWN_HOURS = {"5m": 1, "1h": 4, "1d": 24}
+
+
+def reentry_cooldown_active(symbol: str, timeframe: str = "1h") -> tuple[bool, str]:
+    """
+    Returns (cooldown_active, reason).
+    Blocks re-entry only after a LOSS/STOP_LOSS/TRAILING_STOP close, not after wins.
+    """
+    try:
+        import database as db
+        last = db.get_last_closed_trade(symbol)
+        if not last:
+            return False, "no prior trade"
+        last = dict(last)
+        if last.get("result") != "LOSS":
+            return False, "last trade was a win"
+
+        closed_at = last.get("closed_at")
+        if not closed_at:
+            return False, "no close time"
+
+        closed = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+        if closed.tzinfo is None:
+            closed = closed.replace(tzinfo=timezone.utc)
+
+        hours_since = (datetime.now(timezone.utc) - closed).total_seconds() / 3600
+        cooldown = _COOLDOWN_HOURS.get(timeframe, 4)
+
+        if hours_since < cooldown:
+            remaining = cooldown - hours_since
+            return True, f"lost {hours_since:.1f}h ago — cooling down {remaining:.1f}h more ({timeframe})"
+        return False, f"cooldown cleared ({hours_since:.1f}h since last loss)"
+    except Exception as e:
+        logger.debug("Cooldown check error %s: %s", symbol, e)
+        return False, "cooldown check failed"
