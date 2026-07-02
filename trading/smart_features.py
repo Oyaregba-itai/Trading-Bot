@@ -650,20 +650,24 @@ def trade_quality_score(symbol: str, signal: int, timeframe: str,
         except Exception:
             pass
 
-    # 6. RSI not overbought
+    # 6 & 7. RSI not overbought + volume above average (single yfinance fetch)
+    price_df = None
     try:
         from config import COMMODITY_SYMBOLS
-        sym = symbol
-        ticker = f"{sym}-USD" if symbol in CRYPTO_IDS else (
-            COMMODITY_SYMBOLS.get(sym, sym + "=X") if symbol in COMMODITY_SYMBOLS else sym
+        ticker = f"{symbol}-USD" if symbol in CRYPTO_IDS else (
+            COMMODITY_SYMBOLS.get(symbol, symbol + "=X") if symbol in COMMODITY_SYMBOLS else symbol
         )
-        df = yf.Ticker(ticker).history(period="30d", interval="1h")
-        if df is not None and len(df) >= 15:
-            close = df["Close"]
+        price_df = yf.Ticker(ticker).history(period="30d", interval="1h")
+    except Exception:
+        pass
+
+    try:
+        if price_df is not None and len(price_df) >= 15:
+            import numpy as np
+            close = price_df["Close"]
             delta = close.diff()
             gain = delta.clip(lower=0).ewm(com=13).mean()
             loss = (-delta.clip(upper=0)).ewm(com=13).mean()
-            import numpy as np
             rs = gain / loss.replace(0, np.nan)
             rsi = 100 - (100 / (1 + rs))
             last_rsi = float(rsi.iloc[-1])
@@ -676,10 +680,9 @@ def trade_quality_score(symbol: str, signal: int, timeframe: str,
     except Exception:
         pass
 
-    # 7. Volume above 20-period average
     try:
-        if df is not None and len(df) >= 20:
-            vol = df["Volume"]
+        if price_df is not None and len(price_df) >= 20:
+            vol = price_df["Volume"]
             if float(vol.iloc[-1]) > float(vol.rolling(20).mean().iloc[-1]):
                 score += 1
                 reasons.append("vol✓")

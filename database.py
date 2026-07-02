@@ -141,6 +141,22 @@ def init_db():
             created_at  TEXT    NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS pending_orders (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT    NOT NULL UNIQUE,
+            asset_type  TEXT    NOT NULL,
+            limit_price REAL    NOT NULL,
+            quantity    REAL    NOT NULL,
+            cost        REAL    NOT NULL,
+            stop_loss   REAL,
+            take_profit REAL,
+            confidence  REAL,
+            timeframe   TEXT,
+            signal      TEXT,
+            created_at  TEXT    NOT NULL,
+            expires_at  TEXT    NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS strategy_performance (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             symbol      TEXT    NOT NULL,
@@ -263,6 +279,36 @@ def get_last_closed_trade(symbol: str) -> sqlite3.Row | None:
 def get_all_closed_trades() -> list:
     with get_conn() as c:
         return c.execute("SELECT * FROM trade_history WHERE exit_price IS NOT NULL").fetchall()
+
+
+def place_pending_order(symbol, asset_type, limit_price, quantity, cost,
+                        stop_loss, take_profit, confidence, timeframe, signal, expires_at):
+    with get_conn() as c:
+        c.execute("DELETE FROM pending_orders WHERE symbol=?", (symbol,))
+        c.execute("""
+            INSERT INTO pending_orders
+            (symbol, asset_type, limit_price, quantity, cost, stop_loss, take_profit,
+             confidence, timeframe, signal, created_at, expires_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (symbol, asset_type, limit_price, quantity, cost, stop_loss, take_profit,
+              confidence, timeframe, signal, datetime.utcnow().isoformat(), expires_at))
+
+
+def get_pending_order(symbol: str):
+    with get_conn() as c:
+        return c.execute(
+            "SELECT * FROM pending_orders WHERE symbol=?", (symbol,)
+        ).fetchone()
+
+
+def get_all_pending_orders() -> list:
+    with get_conn() as c:
+        return c.execute("SELECT * FROM pending_orders").fetchall()
+
+
+def delete_pending_order(symbol: str):
+    with get_conn() as c:
+        c.execute("DELETE FROM pending_orders WHERE symbol=?", (symbol,))
 
 
 def get_strategy_performance(days: int = 30) -> list:

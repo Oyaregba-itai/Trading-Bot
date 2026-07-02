@@ -620,14 +620,38 @@ async def _send_report(chat_id: int, loop, via_app=None):
 # ── /backtest ─────────────────────────────────────────────────────────────────
 
 async def cmd_backtest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/backtest BTC 30 — simulate strategy on last N days of real data."""
+    """/backtest BTC 30 | /backtest full BTC — backtest strategy on historical data."""
     if not ctx.args:
         await update.message.reply_text(
             "*Backtest — simulate your strategy on historical data*\n\n"
-            "Usage: `/backtest SYMBOL [days]`\n"
-            "Examples:\n  `/backtest BTC 30`\n  `/backtest GOLD 60`\n  `/backtest TSLA 90`",
+            "Usage:\n"
+            "  `/backtest SYMBOL [days]` — quick N-day walk-forward\n"
+            "  `/backtest full SYMBOL [1h]` — full 2yr ML simulation + Monte Carlo\n\n"
+            "Examples:\n  `/backtest BTC 30`\n  `/backtest full BTC 1h`",
             parse_mode=ParseMode.MARKDOWN
         )
+        return
+
+    # Full historical simulation mode
+    if ctx.args[0].lower() == "full":
+        symbol = ctx.args[1].upper() if len(ctx.args) > 1 else "BTC"
+        tf     = ctx.args[2] if len(ctx.args) > 2 else "1h"
+        await update.message.reply_text(
+            f"Running full 2-year backtest for *{symbol}/{tf}* with Monte Carlo...\n"
+            f"This takes 30-60 seconds.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        main_loop = asyncio.get_event_loop()
+        def _run_full():
+            from ml.backtester import run_full_backtest, format_backtest_report
+            result = run_full_backtest(symbol, tf)
+            report = format_backtest_report(result)
+            asyncio.run_coroutine_threadsafe(
+                update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN),
+                main_loop
+            )
+        import threading
+        threading.Thread(target=_run_full, daemon=True).start()
         return
 
     symbol = ctx.args[0].upper()

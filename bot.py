@@ -114,7 +114,27 @@ async def run_position_monitor(app: Application):
         except Exception:
             pass
 
-    # 3. Grid bot cycle
+    # 3. Check pending limit orders — fill if price reached limit
+    try:
+        from trading.limit_orders import check_limit_fills
+        from trading.auto_trader import _notify
+        fills = check_limit_fills(_get_price)
+        for fill in fills:
+            sym = fill["symbol"]
+            msg = (
+                f"Limit Order Filled: *{sym}*\n"
+                f"Fill price: {fill['fill_price']:.6g} "
+                f"(limit was {fill['limit_price']:.6g})\n"
+                f"Qty: {fill['quantity']:.4f} | Cost: ${fill['cost']:.2f}\n"
+                f"SL: {fill['stop_loss']:.6g} | TP: {fill['take_profit']:.6g}"
+            )
+            for chat_id, syms in _watched.items():
+                if sym in syms:
+                    await _notify(chat_id, msg)
+    except Exception:
+        pass
+
+    # 4. Grid bot cycle
     try:
         from trading.grid_bot import run_grid_cycle
         from trading.auto_trader import _notify
@@ -434,10 +454,10 @@ def main():
         interval=900,
         first=120,
     )
-    # Full trading cycle every 15 minutes — ML + sentiment + new trades
+    # Full trading cycle every 5 minutes — ML + sentiment + new trades
     jq.run_repeating(
         lambda ctx: asyncio.ensure_future(run_auto_trading(app)),
-        interval=900,   # 15 minutes
+        interval=300,   # 5 minutes
         first=90,
     )
     from handlers.extra_handlers import send_daily_report

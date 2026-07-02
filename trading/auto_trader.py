@@ -345,7 +345,8 @@ async def run_trading_cycle(app=None):
             continue
 
         # 4. Open new position — run extra smart checks first
-        if signal == "BUY" and confidence >= 0.60:
+        from trading.demo_wallet import MIN_CONFIDENCE
+        if signal == "BUY" and confidence >= MIN_CONFIDENCE:
 
             # ── Re-entry cooldown ─────────────────────────────────────────────
             cooling, cool_reason = reentry_cooldown_active(symbol, best_tf)
@@ -416,9 +417,39 @@ async def run_trading_cycle(app=None):
             if spike:
                 logger.info("%s social spike: %s", symbol, spike_msg)
 
+            # ── Real-time news NLP (high-impact event blackout) ───────────────
+            try:
+                from data.news_nlp import get_news_signal
+                news = get_news_signal(symbol)
+                if news["impact"] and news["sentiment"] < -0.3:
+                    logger.info("Skip %s — high-impact negative news: %s",
+                                symbol, news["top_headline"][:80])
+                    cycle_skipped += 1
+                    continue
+                # Blend news sentiment into overall sentiment
+                if news["sentiment"] != 0.0:
+                    sentiment_score = (sentiment_score + news["sentiment"] * 0.3) / 1.3
+            except Exception:
+                pass
+
+            # ── Cross-asset macro confirmation ────────────────────────────────
+            try:
+                from data.cross_asset import get_cross_asset_signal
+                ca = get_cross_asset_signal(symbol)
+                # Skip if strong macro headwind AND VIX elevated
+                if ca["confirmation"] < -0.4 and ca["vix_risk_off"] > 0.6:
+                    logger.info("Skip %s — macro headwind (conf=%.2f, VIX=%.2f)",
+                                symbol, ca["confirmation"], ca["vix_risk_off"])
+                    cycle_skipped += 1
+                    continue
+                # Blend cross-asset into combined multiplier
+                ca_mult = max(0.5, min(1.3, 1.0 + ca["confirmation"] * 0.3))
+            except Exception:
+                ca_mult = 1.0
+
             # ── Trade quality gate (≥3 independent signals must agree) ────────
             quality_ok, quality_reason = quality_allows_trade(
-                symbol, signal, best_tf,
+                symbol, 1 if signal == "BUY" else 0, best_tf,
                 regime_ok=regime_ok, engulfing=engulf_ok,
                 ml_confidence=confidence,
             )
@@ -427,9 +458,21 @@ async def run_trading_cycle(app=None):
                 cycle_skipped += 1
                 continue
 
+            # ── Multi-exchange best price (use cheapest ask available) ───────
+            try:
+                from trading.multi_exchange import get_best_price
+                mx = get_best_price(symbol)
+                if mx["best_price"] and mx["best_price"] < price:
+                    price = mx["best_price"]   # better fill
+                # Blend divergence signal into sentiment
+                if mx["divergence_signal"] != 0.0:
+                    sentiment_score = (sentiment_score + mx["divergence_signal"] * 0.2) / 1.2
+            except Exception:
+                pass
+
             # ── Combined size multiplier ──────────────────────────────────────
             fund_mult = funding_rate_size_mult(symbol, signal)
-            combined_mult = fund_mult * corr_mult * sess_mult * regime_mult
+            combined_mult = fund_mult * corr_mult * sess_mult * regime_mult * ca_mult
             # Boost slightly if engulfing candle confirmed
             if engulf_ok:
                 combined_mult = min(combined_mult * 1.15, 1.5)
@@ -439,6 +482,42 @@ async def run_trading_cycle(app=None):
             improve_mult = _db.get_symbol_size_mult(symbol)
             combined_mult *= improve_mult
 
+            # ── Place limit buy order (better fill than market) ───────────────
+            try:
+                from trading.limit_orders import place_limit_buy
+                from trading.demo_wallet import _trade_params, get_portfolio_value, MIN_CASH_RESERVE
+                pv        = get_portfolio_value()
+                cash      = pv["cash"]
+                equity    = pv["total_equity"]
+                params    = _trade_params(symbol, sentiment_score * combined_mult,
+                                          confidence, equity, best_tf)
+                available = cash - MIN_CASH_RESERVE
+                if available >= 10:
+                    rr = params["tp_pct"] / params["sl_pct"] if params["sl_pct"] > 0 else 0
+                    if rr >= 2.0:
+                        cost     = min(params["position_size"], available)
+                        quantity = cost / price if price > 0 else 0
+                        sl_price = price * (1 - params["sl_pct"])
+                        tp_price = price * (1 + params["tp_pct"])
+                        lo = place_limit_buy(
+                            symbol=symbol, asset_type=asset_type,
+                            market_price=price, quantity=quantity, cost=cost,
+                            stop_loss=sl_price, take_profit=tp_price,
+                            confidence=confidence, timeframe=best_tf, signal=signal,
+                        )
+                        if lo:
+                            cycle_trades += 1
+                            await _notify(
+                                list(_watched.keys())[0],
+                                f"Limit Buy Placed: *{symbol}*\n"
+                                f"Limit @ {lo['limit_price']:.6g} (market {price:.6g})\n"
+                                f"Expires: {lo['expires_at'][11:16]} UTC"
+                            )
+                            continue
+            except Exception as e:
+                logger.debug("Limit order failed %s, using market: %s", symbol, e)
+
+            # Fallback: market order if limit placement failed
             trade = execute_buy(symbol, asset_type, price, confidence, signal,
                                 sentiment=sentiment_score * combined_mult, timeframe=best_tf)
             if not trade:
