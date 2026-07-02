@@ -124,6 +124,22 @@ def init_db():
             active          INTEGER DEFAULT 1,
             created_at      TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS symbol_adjustments (
+            symbol      TEXT    PRIMARY KEY,
+            size_mult   REAL    NOT NULL DEFAULT 1.0,
+            reason      TEXT,
+            updated_at  TEXT    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_lessons (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT,
+            lesson      TEXT    NOT NULL,
+            regime      TEXT,
+            timeframe   TEXT,
+            created_at  TEXT    NOT NULL
+        );
     """)
 
     # Seed wallet if empty
@@ -375,3 +391,76 @@ def update_dca(dca_id, next_run, qty_bought, amount_spent, new_avg):
 def stop_dca(dca_id):
     with get_conn() as c:
         c.execute("UPDATE dca_schedules SET active=0 WHERE id=?", (dca_id,))
+
+
+# ── Per-symbol intelligence helpers ──────────────────────────────────────────
+
+def get_consecutive_losses(symbol: str) -> int:
+    """Count consecutive losses from most recent trade backwards."""
+    with get_conn() as c:
+        rows = c.execute(
+            "SELECT result FROM trade_history WHERE symbol=? ORDER BY closed_at DESC LIMIT 10",
+            (symbol,)
+        ).fetchall()
+    count = 0
+    for row in rows:
+        if row["result"] == "LOSS":
+            count += 1
+        else:
+            break
+    return count
+
+
+def get_symbol_trades(symbol: str, days: int = 7) -> list:
+    """All trades for a symbol in the last N days."""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_conn() as c:
+        return c.execute(
+            "SELECT * FROM trade_history WHERE symbol=? AND closed_at>=? ORDER BY closed_at DESC",
+            (symbol, cutoff)
+        ).fetchall()
+
+
+def get_recent_trades_all(days: int = 7) -> list:
+    """All closed trades across all symbols in last N days."""
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_conn() as c:
+        return c.execute(
+            "SELECT * FROM trade_history WHERE closed_at>=? ORDER BY closed_at DESC",
+            (cutoff,)
+        ).fetchall()
+
+
+def get_symbol_size_mult(symbol: str) -> float:
+    """Get self-improvement size multiplier for a symbol (default 1.0)."""
+    with get_conn() as c:
+        row = c.execute(
+            "SELECT size_mult FROM symbol_adjustments WHERE symbol=?", (symbol,)
+        ).fetchone()
+    return float(row["size_mult"]) if row else 1.0
+
+
+def set_symbol_size_mult(symbol: str, mult: float, reason: str = ""):
+    with get_conn() as c:
+        c.execute("""
+            INSERT OR REPLACE INTO symbol_adjustments (symbol, size_mult, reason, updated_at)
+            VALUES (?,?,?,?)
+        """, (symbol, mult, reason, datetime.utcnow().isoformat()))
+
+
+def save_lesson(symbol: str, lesson: str, regime: str = "", timeframe: str = ""):
+    with get_conn() as c:
+        c.execute("""
+            INSERT INTO agent_lessons (symbol, lesson, regime, timeframe, created_at)
+            VALUES (?,?,?,?,?)
+        """, (symbol, lesson, regime, timeframe, datetime.utcnow().isoformat()))
+
+
+def get_lessons(symbol: str, limit: int = 5) -> list:
+    with get_conn() as c:
+        return c.execute(
+            "SELECT * FROM agent_lessons WHERE symbol=? ORDER BY created_at DESC LIMIT ?",
+            (symbol, limit)
+        ).fetchall()

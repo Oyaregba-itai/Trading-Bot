@@ -66,12 +66,45 @@ def _asset_class(symbol: str) -> str:
     return "stock"
 
 
+def _get_adr_pct(symbol: str, timeframe: str = "1h", periods: int = 14) -> float | None:
+    """
+    Average Daily Range as a % of price over last N periods.
+    Returns None if data unavailable (falls back to fixed presets).
+    """
+    try:
+        from ml.trainer import fetch_training_data
+        df = fetch_training_data(symbol, timeframe)
+        if df is None or len(df) < periods + 1:
+            return None
+        adr      = (df["High"] - df["Low"]).tail(periods).mean()
+        price    = float(df["Close"].iloc[-1])
+        if price <= 0:
+            return None
+        return float(adr / price)
+    except Exception:
+        return None
+
+
 def _trade_params(symbol: str, sentiment: float, confidence: float, equity: float,
                   timeframe: str = "1h") -> dict:
     """Return position size (cash), stop loss price multiplier, take profit multiplier."""
     cls    = _asset_class(symbol)
     tf_map = _VOLATILITY.get(timeframe, _VOLATILITY["1h"])
     preset = tf_map.get(cls, tf_map["stock"])
+
+    # Try ADR-based dynamic SL/TP — more adaptive than fixed presets
+    adr_pct = _get_adr_pct(symbol, timeframe)
+    if adr_pct and adr_pct > 0:
+        # SL = 0.5x ADR, TP = 1.5x ADR (scales with actual symbol volatility)
+        tf_tp_mult = {"5m": 0.8, "1h": 1.5, "1d": 2.0}.get(timeframe, 1.5)
+        dyn_sl = max(adr_pct * 0.5, preset["sl"] * 0.5)   # floor at half preset
+        dyn_tp = max(adr_pct * tf_tp_mult, preset["tp"] * 0.5)
+        # Cap to 2x preset to avoid huge stops on volatile days
+        sl_pct = min(dyn_sl, preset["sl"] * 2.0)
+        tp_pct = min(dyn_tp, preset["tp"] * 2.0)
+    else:
+        sl_pct = preset["sl"]
+        tp_pct = preset["tp"]
 
     base_size = preset["size"]
 
@@ -99,8 +132,8 @@ def _trade_params(symbol: str, sentiment: float, confidence: float, equity: floa
 
     return {
         "position_cash": equity * final_size,
-        "sl_pct":        preset["sl"],
-        "tp_pct":        preset["tp"],
+        "sl_pct":        sl_pct,
+        "tp_pct":        tp_pct,
         "asset_class":   cls,
     }
 

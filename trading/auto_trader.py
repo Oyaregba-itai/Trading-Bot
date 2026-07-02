@@ -180,7 +180,11 @@ async def run_trading_cycle(app=None):
     from trading.smart_features import (daily_loss_limit_hit, check_stale_positions,
                                         timeframe_aligned, earnings_blackout,
                                         funding_rate_size_mult, social_volume_spike,
-                                        reentry_cooldown_active)
+                                        reentry_cooldown_active, symbol_circuit_breaker,
+                                        correlation_filter, macro_event_blackout,
+                                        portfolio_heat_ok, engulfing_confirmed,
+                                        session_size_mult)
+    from trading.regime_detector import regime_allows_buy
     from utils.formatters import fmt_price
 
     _ensure_default_session()
@@ -250,12 +254,20 @@ async def run_trading_cycle(app=None):
             cycle_trades += 1
             continue
 
-        # 2. Get sentiment
+        # 2. Get sentiment (news + congressional trades for stocks)
         try:
             sentiment_result = aggregate_sentiment(symbol, log_to_db=True)
             sentiment_score = sentiment_result.composite
         except Exception:
             sentiment_score = 0.0
+
+        try:
+            from data.congressional import get_congressional_signal
+            cong_score, _ = get_congressional_signal(symbol)
+            if cong_score != 0.0:
+                sentiment_score = (sentiment_score + cong_score) / 2
+        except Exception:
+            pass
 
         # Block stablecoins
         from config import STABLECOIN_SYMBOLS
@@ -329,32 +341,89 @@ async def run_trading_cycle(app=None):
         # 4. Open new position — run extra smart checks first
         if signal == "BUY" and confidence >= 0.60:
 
+            # ── Re-entry cooldown ─────────────────────────────────────────────
             cooling, cool_reason = reentry_cooldown_active(symbol, best_tf)
             if cooling:
                 logger.info("Skipping %s — %s", symbol, cool_reason)
                 cycle_skipped += 1
                 continue
 
+            # ── Per-symbol circuit breaker ────────────────────────────────────
+            tripped, cb_reason = symbol_circuit_breaker(symbol)
+            if tripped:
+                logger.info("Skipping %s — %s", symbol, cb_reason)
+                cycle_skipped += 1
+                continue
+
+            # ── Macro event blackout ──────────────────────────────────────────
+            macro_blocked, macro_reason = macro_event_blackout(symbol)
+            if macro_blocked:
+                logger.info("Skipping %s — %s", symbol, macro_reason)
+                cycle_skipped += 1
+                continue
+
+            # ── Market regime check ───────────────────────────────────────────
+            regime_ok, regime_mult, regime_reason = regime_allows_buy(symbol, best_tf)
+            if not regime_ok:
+                logger.info("Skipping %s — %s", symbol, regime_reason)
+                cycle_skipped += 1
+                continue
+
+            # ── Earnings blackout ─────────────────────────────────────────────
             blacked_out, earn_reason = earnings_blackout(symbol)
             if blacked_out:
                 logger.info("Skipping %s — %s", symbol, earn_reason)
                 cycle_skipped += 1
                 continue
 
+            # ── 4H timeframe alignment ────────────────────────────────────────
             tf_ok, tf_reason = timeframe_aligned(symbol, signal)
             if not tf_ok:
                 logger.info("Skipping %s — %s", symbol, tf_reason)
                 cycle_skipped += 1
                 continue
 
+            # ── Portfolio heat limit ──────────────────────────────────────────
+            from trading.demo_wallet import get_portfolio_value
+            portfolio_snap = get_portfolio_value()
+            equity_snap    = portfolio_snap["total_equity"]
+            est_trade_size = equity_snap * 0.20  # rough estimate before full sizing
+            heat_ok, heat_reason = portfolio_heat_ok(est_trade_size, equity_snap)
+            if not heat_ok:
+                logger.info("Skipping %s — %s", symbol, heat_reason)
+                cycle_skipped += 1
+                continue
+
+            # ── Correlation filter (size reducer, not blocker) ────────────────
+            corr_mult, corr_reason = correlation_filter(symbol)
+            if corr_mult < 1.0:
+                logger.info("%s correlation size reduced: %s", symbol, corr_reason)
+
+            # ── Session quality (size adjuster) ───────────────────────────────
+            sess_mult, sess_name = session_size_mult(symbol)
+
+            # ── Engulfing candle (quality signal, not hard gate) ──────────────
+            engulf_ok, engulf_reason = engulfing_confirmed(symbol, best_tf)
+
+            # ── Social volume spike ───────────────────────────────────────────
             spike, spike_msg = social_volume_spike(symbol)
             if spike:
                 logger.info("%s social spike: %s", symbol, spike_msg)
 
+            # ── Combined size multiplier ──────────────────────────────────────
             fund_mult = funding_rate_size_mult(symbol, signal)
+            combined_mult = fund_mult * corr_mult * sess_mult * regime_mult
+            # Boost slightly if engulfing candle confirmed
+            if engulf_ok:
+                combined_mult = min(combined_mult * 1.15, 1.5)
+
+            # ── Self-improvement size multiplier (from weekly self-improver) ──
+            import database as _db
+            improve_mult = _db.get_symbol_size_mult(symbol)
+            combined_mult *= improve_mult
 
             trade = execute_buy(symbol, asset_type, price, confidence, signal,
-                                sentiment=sentiment_score * fund_mult, timeframe=best_tf)
+                                sentiment=sentiment_score * combined_mult, timeframe=best_tf)
             if not trade:
                 cycle_skipped += 1
             if trade:
@@ -376,6 +445,8 @@ async def run_trading_cycle(app=None):
                         logger.warning("Binance order skipped for %s: %s", symbol, _be)
 
                 msg = _format_buy_msg(trade, pred)
+                if engulf_ok:
+                    msg += f"\n🕯 {engulf_reason}"
                 if spike:
                     msg += f"\n⚡ Social spike: {spike_msg}"
                 if binance_note:

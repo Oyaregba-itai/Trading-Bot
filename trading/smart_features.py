@@ -6,7 +6,13 @@ Advanced trading intelligence features:
   4. Earnings blackout (avoid stocks 2 days before earnings)
   5. Crypto funding rates (negative funding = bearish futures sentiment)
   6. Social volume spike (Reddit mention surge = something happening)
-  7. Re-entry cooldown (don't immediately re-buy a symbol that just stopped out)
+  7. Re-entry cooldown (don't immediately re-buy after a loss)
+  8. Per-symbol circuit breaker (pause symbol after 3 consecutive losses)
+  9. Correlation filter (don't double-up on highly correlated symbols)
+  10. Macro event blackout (avoid trading around Fed/NFP/CPI events)
+  11. Portfolio heat limit (cap total at-risk across all open positions)
+  12. Engulfing candle + volume confirmation entry filter
+  13. Trading session quality (scale size by liquidity of current session)
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -335,3 +341,255 @@ def reentry_cooldown_active(symbol: str, timeframe: str = "1h") -> tuple[bool, s
     except Exception as e:
         logger.debug("Cooldown check error %s: %s", symbol, e)
         return False, "cooldown check failed"
+
+
+# ── 8. Per-symbol Circuit Breaker ─────────────────────────────────────────────
+
+def symbol_circuit_breaker(symbol: str) -> tuple[bool, str]:
+    """
+    Block a symbol that has 3+ consecutive losses until 24h after the last loss.
+    Prevents the bot from repeatedly re-entering a clearly broken setup.
+    """
+    try:
+        import database as db
+        consecutive = db.get_consecutive_losses(symbol)
+        if consecutive < 3:
+            return False, f"{consecutive} consecutive losses — ok"
+
+        last = db.get_last_closed_trade(symbol)
+        if not last:
+            return False, "no trade history"
+        last = dict(last)
+        closed_at = last.get("closed_at", "")
+        if not closed_at:
+            return False, "no close time"
+
+        closed = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+        if closed.tzinfo is None:
+            closed = closed.replace(tzinfo=timezone.utc)
+        hours_since = (datetime.now(timezone.utc) - closed).total_seconds() / 3600
+
+        if hours_since < 24:
+            return True, f"{consecutive} consecutive losses — circuit breaker active ({24-hours_since:.0f}h remaining)"
+        return False, f"{consecutive} consecutive losses but 24h passed — circuit reset"
+    except Exception as e:
+        logger.debug("Circuit breaker error %s: %s", symbol, e)
+        return False, "circuit breaker check failed"
+
+
+# ── 9. Correlation Filter ─────────────────────────────────────────────────────
+
+# Predefined correlation groups — symbols within a group move together
+_CORR_GROUPS: list[set] = [
+    {"BTC", "ETH", "BNB", "SOL", "AVAX", "LTC", "XRP", "ADA", "DOT", "LINK"},
+    {"DOGE", "SHIB", "PEPE", "WIF", "BONK", "FLOKI", "SUI", "TRX"},
+    {"EURUSD", "GBPUSD", "EURGBP", "AUDUSD"},
+    {"USDJPY", "USDCAD", "USDCHF"},
+    {"GOLD", "SILVER"},
+    {"OIL", "NATGAS"},
+    {"AAPL", "MSFT", "NVDA", "AMD", "TSLA", "GOOGL", "META", "AMZN"},
+]
+
+
+def correlation_filter(symbol: str) -> tuple[float, str]:
+    """
+    Returns (size_multiplier, reason).
+    If we already have open positions in the same correlation group,
+    reduce new position size to avoid doubling exposure.
+    1 existing correlated position → 0.7x size
+    2+ existing correlated positions → 0.5x size
+    """
+    try:
+        import database as db
+        open_syms = {p["symbol"] for p in (db.get_all_positions() or [])}
+        if not open_syms:
+            return 1.0, "no open positions"
+
+        sym_group = next((g for g in _CORR_GROUPS if symbol in g), None)
+        if sym_group is None:
+            return 1.0, "no correlation group"
+
+        correlated_open = open_syms & sym_group
+        if not correlated_open:
+            return 1.0, "no correlated positions open"
+
+        n = len(correlated_open)
+        mult = 0.7 if n == 1 else 0.5
+        return mult, f"{n} correlated position(s) open ({', '.join(correlated_open)}) — size {mult:.0%}"
+    except Exception as e:
+        logger.debug("Correlation filter error %s: %s", symbol, e)
+        return 1.0, "correlation check failed"
+
+
+# ── 10. Macro Event Blackout ──────────────────────────────────────────────────
+
+def _first_friday(year: int, month: int) -> int:
+    """Return the day-of-month of the first Friday in a given year/month."""
+    import calendar
+    cal = calendar.monthcalendar(year, month)
+    for week in cal:
+        if week[calendar.FRIDAY] != 0:
+            return week[calendar.FRIDAY]
+    return 7
+
+
+# FOMC meeting dates 2026 (approximate — decisions announced ~14:00 ET = 19:00 UTC)
+_FOMC_2026 = [
+    (1, 28), (3, 18), (5, 6), (6, 17),
+    (7, 29), (9, 16), (10, 28), (12, 9),
+]
+
+
+def macro_event_blackout(symbol: str) -> tuple[bool, str]:
+    """
+    Returns (in_blackout, reason).
+    Blocks forex, crypto, and stock trades 30 min before and 90 min after:
+      - NFP (Non-Farm Payrolls): first Friday of month, 08:30 ET (13:30 UTC)
+      - FOMC rate decisions: hardcoded 2026 dates, ~19:00 UTC
+      - CPI: second Wednesday of month, 08:30 ET (13:30 UTC)
+
+    Crypto is included because macro news causes large moves on BTC/ETH too.
+    """
+    from config import STOCK_SYMBOLS
+    # Only apply to forex and stocks (and crypto for NFP/FOMC)
+    from config import CRYPTO_IDS, COMMODITY_SYMBOLS
+    is_forex = len(symbol) == 6 and symbol.isalpha()
+    is_stock = symbol in STOCK_SYMBOLS
+    is_crypto = symbol in CRYPTO_IDS
+    if not (is_forex or is_stock or is_crypto):
+        return False, "not affected by macro events"
+
+    now = datetime.now(timezone.utc)
+    y, m, d, h, mi = now.year, now.month, now.day, now.hour, now.minute
+    now_mins = h * 60 + mi  # minutes since midnight UTC
+
+    def in_window(event_utc_h: int, event_utc_m: int, before_mins=30, after_mins=90) -> bool:
+        event_mins = event_utc_h * 60 + event_utc_m
+        return (event_mins - before_mins) <= now_mins <= (event_mins + after_mins)
+
+    # NFP — first Friday of each month at 13:30 UTC
+    if now.weekday() == 4:  # Friday
+        nfp_day = _first_friday(y, m)
+        if d == nfp_day and in_window(13, 30):
+            return True, f"NFP blackout — Non-Farm Payrolls at 13:30 UTC"
+
+    # FOMC — hardcoded 2026 dates at 19:00 UTC
+    if y == 2026:
+        for fomc_m, fomc_d in _FOMC_2026:
+            if m == fomc_m and d == fomc_d and in_window(19, 0, before_mins=30, after_mins=120):
+                return True, f"FOMC blackout — Fed rate decision"
+
+    # CPI — second Wednesday of month at 13:30 UTC
+    if now.weekday() == 2:  # Wednesday
+        import calendar as cal_mod
+        weeks = cal_mod.monthcalendar(y, m)
+        wednesdays = [w[cal_mod.WEDNESDAY] for w in weeks if w[cal_mod.WEDNESDAY] != 0]
+        if len(wednesdays) >= 2 and d == wednesdays[1] and in_window(13, 30):
+            return True, f"CPI blackout — Consumer Price Index release at 13:30 UTC"
+
+    return False, "no macro events"
+
+
+# ── 11. Portfolio Heat Limit ──────────────────────────────────────────────────
+
+PORTFOLIO_HEAT_LIMIT = 0.25   # Max 25% of wallet at risk simultaneously
+
+def portfolio_heat_ok(new_trade_cash: float, equity: float) -> tuple[bool, str]:
+    """
+    Returns (ok, reason).
+    Calculates total capital currently at risk (cost of all open positions)
+    and blocks a new trade if it would push total exposure above 25%.
+    """
+    try:
+        import database as db
+        positions = db.get_all_positions() or []
+        current_at_risk = sum(p["cost"] for p in positions)
+        total_after = current_at_risk + new_trade_cash
+        heat = total_after / max(equity, 1)
+        if heat > PORTFOLIO_HEAT_LIMIT:
+            return False, f"portfolio heat {heat:.0%} would exceed {PORTFOLIO_HEAT_LIMIT:.0%} limit"
+        return True, f"portfolio heat {heat:.0%} — ok"
+    except Exception as e:
+        logger.debug("Portfolio heat error: %s", e)
+        return True, "heat check failed — allowing"
+
+
+# ── 12. Engulfing Candle + Volume Confirmation ────────────────────────────────
+
+def engulfing_confirmed(symbol: str, timeframe: str = "1h") -> tuple[bool, str]:
+    """
+    Returns (confirmed, reason).
+    A bullish engulfing candle with above-average volume is a high-quality entry signal.
+    Not blocking — returns False if pattern absent, but bot can still trade (just no boost).
+    Used as a quality score bonus, not a hard gate.
+    """
+    try:
+        from ml.trainer import fetch_training_data
+        df = fetch_training_data(symbol, timeframe)
+        if df is None or len(df) < 22:
+            return False, "insufficient data"
+
+        prev  = df.iloc[-2]
+        curr  = df.iloc[-1]
+
+        prev_body = abs(prev["Close"] - prev["Open"])
+        curr_body = abs(curr["Close"] - curr["Open"])
+
+        # Bullish engulfing: current green candle body engulfs previous candle body
+        bullish_engulf = (
+            curr["Close"] > curr["Open"] and       # current is green
+            prev["Close"] < prev["Open"] and       # previous is red
+            curr["Open"] <= prev["Close"] and      # opens below prev close
+            curr["Close"] >= prev["Open"] and      # closes above prev open
+            curr_body > prev_body * 0.8            # body is substantial
+        )
+
+        if not bullish_engulf:
+            return False, "no engulfing pattern"
+
+        # Volume confirmation: current volume > 1.2x 20-period average
+        avg_vol = float(df["Volume"].tail(20).mean())
+        curr_vol = float(curr["Volume"])
+        if avg_vol > 0 and curr_vol > avg_vol * 1.2:
+            return True, f"bullish engulfing + volume {curr_vol/avg_vol:.1f}x avg"
+
+        return False, f"engulfing pattern but volume weak ({curr_vol/avg_vol:.1f}x avg)"
+    except Exception as e:
+        logger.debug("Engulfing check error %s: %s", symbol, e)
+        return False, "engulfing check failed"
+
+
+# ── 13. Trading Session Quality ───────────────────────────────────────────────
+
+def session_size_mult(symbol: str) -> tuple[float, str]:
+    """
+    Returns (size_multiplier, session_name).
+    Scale position size by current session liquidity.
+    London-NY overlap is the highest quality session for forex.
+    Asian session has lower liquidity → smaller forex positions.
+    Crypto is unaffected (24/7 equal liquidity).
+    """
+    from config import CRYPTO_IDS, COMMODITY_SYMBOLS
+    if symbol in CRYPTO_IDS:
+        return 1.0, "crypto 24/7"
+
+    now  = datetime.now(timezone.utc)
+    hour = now.hour
+
+    is_forex = len(symbol) == 6 and symbol.isalpha()
+
+    if is_forex:
+        if 13 <= hour < 16:
+            return 1.2, "London-NY overlap (peak liquidity)"
+        elif 7 <= hour < 13 or 16 <= hour < 21:
+            return 1.0, "London or NY session"
+        else:
+            return 0.7, "Asian/off-hours session (low forex liquidity)"
+
+    if symbol in COMMODITY_SYMBOLS:
+        if 13 <= hour < 21:
+            return 1.0, "commodity NY session"
+        return 0.85, "commodity off-hours"
+
+    # Stocks: only trade during market hours (already gated elsewhere)
+    return 1.0, "stock market hours"

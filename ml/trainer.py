@@ -285,6 +285,98 @@ def train_symbol(symbol: str, days: int = 500,
     return metrics
 
 
+def walk_forward_backtest(symbol: str, timeframe: str = "1h",
+                          n_splits: int = 4) -> dict:
+    """
+    Walk-forward validation: train on rolling windows, test on unseen data.
+    Avoids overfitting by ensuring test data was never seen during training.
+
+    Returns {symbol, timeframe, avg_accuracy, avg_precision, avg_recall,
+             window_results, passed} where passed=True means avg_accuracy > 0.52
+    and avg_recall > 0.10 (model generalises beyond random guessing).
+    """
+    from ml.features import build_feature_matrix, build_labels
+    import numpy as np
+
+    df = fetch_training_data(symbol, timeframe)
+    if df is None or len(df) < 150:
+        return {"symbol": symbol, "timeframe": timeframe,
+                "error": "Not enough data for walk-forward test (need ≥150 candles)"}
+
+    horizon = {"5m": 3, "1h": 4, "1d": 3}.get(timeframe, 4)
+    abs_returns = df["Close"].pct_change().abs().dropna()
+    thr = max(0.0005, float(abs_returns.quantile(0.25)))
+
+    features = build_feature_matrix(df, sentiment_score=0.0, fear_greed=50)
+    labels   = build_labels(df, horizon_days=horizon, threshold=thr)
+    combined = features.join(labels.rename("label")).dropna()
+    combined = combined[combined["label"] != 0]   # drop HOLD rows
+
+    if len(combined) < 100:
+        return {"symbol": symbol, "timeframe": timeframe,
+                "error": f"Only {len(combined)} usable samples for walk-forward"}
+
+    X = combined.drop(columns=["label"]).values
+    y = combined["label"].astype(int).values
+
+    window_size = len(X) // (n_splits + 1)
+    results = []
+
+    for i in range(n_splits):
+        train_end  = window_size * (i + 1)
+        test_start = train_end
+        test_end   = min(test_start + window_size, len(X))
+
+        X_train, y_train = X[:train_end], y[:train_end]
+        X_test,  y_test  = X[test_start:test_end], y[test_start:test_end]
+
+        if len(X_train) < 50 or len(X_test) < 20:
+            continue
+
+        from ml.model import TradingModel
+        m = TradingModel(symbol, timeframe)
+        try:
+            import pandas as pd
+            feat_names = combined.drop(columns=["label"]).columns.tolist()
+            metrics = m.train(
+                pd.DataFrame(X_train, columns=feat_names),
+                pd.Series(y_train)
+            )
+            # Evaluate on held-out window
+            from sklearn.metrics import accuracy_score, precision_score, recall_score
+            X_test_df = pd.DataFrame(X_test, columns=feat_names)
+            preds = m.model.predict(X_test_df)
+            window_res = {
+                "window": i + 1,
+                "train_n": len(X_train),
+                "test_n":  len(X_test),
+                "accuracy":  float(accuracy_score(y_test, preds)),
+                "precision": float(precision_score(y_test, preds, zero_division=0)),
+                "recall":    float(recall_score(y_test, preds, zero_division=0)),
+            }
+            results.append(window_res)
+        except Exception as e:
+            results.append({"window": i + 1, "error": str(e)})
+
+    if not results or all("error" in r for r in results):
+        return {"symbol": symbol, "timeframe": timeframe, "error": "all windows failed"}
+
+    valid = [r for r in results if "error" not in r]
+    avg_acc = float(np.mean([r["accuracy"]  for r in valid]))
+    avg_pre = float(np.mean([r["precision"] for r in valid]))
+    avg_rec = float(np.mean([r["recall"]    for r in valid]))
+
+    return {
+        "symbol":        symbol,
+        "timeframe":     timeframe,
+        "avg_accuracy":  round(avg_acc, 4),
+        "avg_precision": round(avg_pre, 4),
+        "avg_recall":    round(avg_rec, 4),
+        "window_results": results,
+        "passed":        avg_acc > 0.52 and avg_rec > 0.10,
+    }
+
+
 def train_multiple(symbols: list[str], timeframes: list[str] | None = None,
                    progress_callback=None) -> list[dict]:
     if timeframes is None:

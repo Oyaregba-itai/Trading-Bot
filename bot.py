@@ -180,7 +180,7 @@ async def auto_retrain(app: Application):
 
 
 async def _weekly_report(app: Application):
-    """Every Sunday 9 AM — send a full week performance summary."""
+    """Every Sunday 9 AM — send performance summary then run self-improvement."""
     from trading.auto_trader import _watched
     from trading.performance import compute_metrics, bot_rating
     from database import get_all_closed_trades
@@ -189,7 +189,6 @@ async def _weekly_report(app: Application):
     if not _watched:
         return
 
-    # Trades from last 7 days
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
     all_trades = get_all_closed_trades()
     week_trades = [t for t in all_trades if (t["closed_at"] or "") >= week_ago]
@@ -197,26 +196,61 @@ async def _weekly_report(app: Application):
     metrics = compute_metrics()
     rating  = bot_rating(metrics)
 
-    wins   = len([t for t in week_trades if t["result"] == "WIN"])
-    losses = len([t for t in week_trades if t["result"] == "LOSS"])
+    wins     = len([t for t in week_trades if t["result"] == "WIN"])
+    losses   = len([t for t in week_trades if t["result"] == "LOSS"])
     week_pnl = sum(t["pnl"] or 0 for t in week_trades)
 
+    # Best and worst symbol this week
+    by_sym: dict[str, float] = {}
+    for t in week_trades:
+        by_sym[t["symbol"]] = by_sym.get(t["symbol"], 0) + (t["pnl"] or 0)
+    best_sym  = max(by_sym, key=by_sym.get) if by_sym else "—"
+    worst_sym = min(by_sym, key=by_sym.get) if by_sym else "—"
+
     lines = [
-        "*Weekly Performance Report*",
+        "📊 *Weekly Performance Report*",
         "",
-        f"This week: {len(week_trades)} trades | {wins}W / {losses}L | P&L: ${week_pnl:+.2f}",
-        f"All-time rating: {rating}",
-        f"Total return: {metrics.get('total_return_pct', 0):+.2f}%",
-        f"Win rate: {metrics.get('win_rate', 0)*100:.1f}%",
+        f"*This week:* {len(week_trades)} trades | {wins}W / {losses}L | P&L: *${week_pnl:+.2f}*",
+        f"*All-time rating:* {rating}",
+        f"*Total return:* {metrics.get('total_return_pct', 0):+.2f}%",
+        f"*Win rate:* {metrics.get('win_rate', 0)*100:.1f}%",
+        f"*Sharpe:* {metrics.get('sharpe', 0):.3f}",
         "",
-        "Use /performance for full stats, /export for CSV download.",
+        f"🏆 Best symbol: *{best_sym}* (+${by_sym.get(best_sym, 0):.2f})" if by_sym else "",
+        f"📉 Worst symbol: *{worst_sym}* (${by_sym.get(worst_sym, 0):.2f})" if by_sym else "",
+        "",
+        "Use /performance for full stats, /export for CSV.",
     ]
-    msg = "\n".join(lines)
-    for chat_id in list(_watched.keys()):
+    msg = "\n".join(l for l in lines if l is not None)
+
+    chat_ids = list(_watched.keys())
+    for chat_id in chat_ids:
         try:
-            await app.bot.send_message(chat_id=chat_id, text=msg)
+            await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
         except Exception:
             pass
+
+    # Run self-improvement loop after sending performance report
+    try:
+        import threading
+        from trading.self_improver import run_self_improvement
+
+        async def _notify_self(cid: int, message: str):
+            await app.bot.send_message(chat_id=cid, text=message, parse_mode="Markdown")
+
+        def _run_improve():
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            run_self_improvement(
+                notify_cb=lambda cid, msg: loop.run_until_complete(_notify_self(cid, msg)),
+                chat_ids=chat_ids,
+            )
+            loop.close()
+
+        threading.Thread(target=_run_improve, daemon=True).start()
+    except Exception as e:
+        logger.error("Self-improver error: %s", e)
 
 
 def _setup_notify_callback(app: Application):
