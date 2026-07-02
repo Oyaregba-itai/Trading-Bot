@@ -136,19 +136,18 @@ def build_feature_matrix(df: pd.DataFrame, sentiment_score: float = 0.0,
     # ── ADX (Average Directional Index — trend strength 0-100) ────────────────
     up_move   = high.diff()
     down_move = -low.diff()
-    plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm  = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Keep as pandas Series (preserves datetime index) — np.where strips the index
+    plus_dm  = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
     tr2 = pd.concat([high - low, (high - close.shift()).abs(),
                      (low - close.shift()).abs()], axis=1).max(axis=1)
     atr14 = tr2.rolling(14).mean().replace(0, 1e-9)
-    pdi   = 100 * pd.Series(plus_dm).rolling(14).mean() / atr14
-    mdi   = 100 * pd.Series(minus_dm).rolling(14).mean() / atr14
-    pdi.index = df.index
-    mdi.index = df.index
+    pdi   = 100 * plus_dm.rolling(14).mean() / atr14
+    mdi   = 100 * minus_dm.rolling(14).mean() / atr14
     dx    = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, 1e-9)
     adx   = dx.rolling(14).mean()
-    df["adx"]      = (adx / 100).fillna(0.2)   # normalised 0-1
-    df["adx_trend"] = (pdi - mdi).fillna(0) / 100   # positive = bullish, negative = bearish
+    df["adx"]       = (adx / 100).fillna(0.2)
+    df["adx_trend"] = (pdi - mdi).fillna(0) / 100
 
     # ── Williams %R (overbought/oversold -100 to 0) ───────────────────────────
     h14 = high.rolling(14).max()

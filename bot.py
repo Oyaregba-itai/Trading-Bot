@@ -168,12 +168,15 @@ async def auto_retrain(app: Application):
         ok  = [r for r in results if "error" not in r]
         err = [r for r in results if "error" in r]
 
+        # Show first unique error to help debug future failures
+        first_err = err[0]["error"] if err else ""
         summary = (
             f"*Retraining Complete*\n\n"
             f"✅ {len(ok)}/{total} models updated (5m + 1h + 1d)\n"
-            + (f"\n❌ {len(err)} failed" if err else "All timeframes ready.")
+            + (f"\n❌ {len(err)} failed\nFirst error: `{first_err[:120]}`" if err else "All timeframes ready.")
         )
-        logger.info("Auto-retraining done: %d ok, %d failed", len(ok), len(err))
+        logger.info("Auto-retraining done: %d ok, %d failed. First error: %s",
+                    len(ok), len(err), first_err)
         if notify_chats:
             _notify_chats(summary)
 
