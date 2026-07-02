@@ -293,7 +293,8 @@ def execute_buy(symbol: str, asset_type: str, current_price: float,
     }
 
 
-def execute_sell(symbol: str, current_price: float, reason: str = "SIGNAL") -> dict | None:
+def execute_sell(symbol: str, current_price: float, reason: str = "SIGNAL",
+                 timeframe: str = "1h") -> dict | None:
     """Close a position. reason: SIGNAL | STOP_LOSS | TAKE_PROFIT | MANUAL | TRAILING_STOP"""
     pos = db.get_position(symbol)
     if not pos:
@@ -312,7 +313,7 @@ def execute_sell(symbol: str, current_price: float, reason: str = "SIGNAL") -> d
         symbol, pos["asset_type"],
         entry_price, current_price, quantity, cost, revenue,
         pnl, pnl_pct, result, pos["confidence"], reason,
-        pos["opened_at"]
+        pos["opened_at"], timeframe=timeframe,
     )
     db.close_position(symbol)
 

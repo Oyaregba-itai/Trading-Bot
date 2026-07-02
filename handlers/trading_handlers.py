@@ -300,3 +300,51 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*Demo wallet reset to $10,000*\n\nAll open positions cleared. Trade history preserved.\n\nStart again with `/autotrade start`",
         parse_mode=ParseMode.MARKDOWN
     )
+
+
+async def cmd_strategy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /strategy        — show per-symbol, per-timeframe performance (last 30 days)
+    /strategy 7      — last 7 days
+    /strategy 90     — last 90 days
+    """
+    from database import get_strategy_performance
+
+    args = ctx.args or []
+    days = 30
+    if args:
+        try:
+            days = int(args[0])
+        except ValueError:
+            pass
+
+    rows = get_strategy_performance(days=days)
+    if not rows:
+        await update.message.reply_text(
+            f"No strategy data yet for the last {days} days.\n\n"
+            "Data is recorded as trades close. Check back after a few cycles.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    lines = [f"*Strategy Performance — Last {days} days*\n"]
+    lines.append(f"{'Symbol':<8} {'TF':<4} {'Trades':<7} {'Win%':<7} {'P&L':>8}")
+    lines.append("─" * 38)
+
+    for r in rows:
+        pnl_str = f"${r['total_pnl']:+.2f}"
+        lines.append(
+            f"{r['symbol']:<8} {r['timeframe']:<4} {r['trades']:<7} "
+            f"{r['win_rate']:<7.1f} {pnl_str:>8}"
+        )
+
+    total_pnl  = sum(r["total_pnl"] for r in rows)
+    total_tr   = sum(r["trades"] for r in rows)
+    avg_wr     = sum(r["win_rate"] * r["trades"] for r in rows) / max(total_tr, 1)
+    lines.append("─" * 38)
+    lines.append(f"{'TOTAL':<8} {'':>4} {total_tr:<7} {avg_wr:<7.1f} ${total_pnl:+.2f}")
+
+    await update.message.reply_text(
+        "```\n" + "\n".join(lines) + "\n```",
+        parse_mode=ParseMode.MARKDOWN
+    )

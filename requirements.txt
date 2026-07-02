@@ -20,5 +20,6 @@ nltk>=3.9.0
 # YouTube
 youtube-transcript-api>=0.6.0
 
-# Binance Testnet
+# Binance Testnet + WebSocket price feed
 python-binance>=1.0.19
+websockets>=12.0

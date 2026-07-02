@@ -125,6 +125,12 @@ def _get_price(symbol: str) -> float | None:
     try:
         from config import CRYPTO_IDS, COMMODITY_SYMBOLS
         if symbol in CRYPTO_IDS:
+            # Try WebSocket cache first (real-time, <60s old)
+            from trading.ws_price_feed import get_cached_price
+            ws_price = get_cached_price(symbol)
+            if ws_price:
+                return ws_price
+            # Fall back to REST API
             from data.crypto import get_crypto_price
             d = get_crypto_price(symbol)
             return d["price"] if d else None
@@ -183,7 +189,7 @@ async def run_trading_cycle(app=None):
                                         reentry_cooldown_active, symbol_circuit_breaker,
                                         correlation_filter, macro_event_blackout,
                                         portfolio_heat_ok, engulfing_confirmed,
-                                        session_size_mult)
+                                        session_size_mult, quality_allows_trade)
     from trading.regime_detector import regime_allows_buy
     from utils.formatters import fmt_price
 
@@ -409,6 +415,17 @@ async def run_trading_cycle(app=None):
             spike, spike_msg = social_volume_spike(symbol)
             if spike:
                 logger.info("%s social spike: %s", symbol, spike_msg)
+
+            # ── Trade quality gate (≥3 independent signals must agree) ────────
+            quality_ok, quality_reason = quality_allows_trade(
+                symbol, signal, best_tf,
+                regime_ok=regime_ok, engulfing=engulf_ok,
+                ml_confidence=confidence,
+            )
+            if not quality_ok:
+                logger.info("Skip %s — %s", symbol, quality_reason)
+                cycle_skipped += 1
+                continue
 
             # ── Combined size multiplier ──────────────────────────────────────
             fund_mult = funding_rate_size_mult(symbol, signal)

@@ -13,7 +13,8 @@ from handlers.portfolio_handlers import cmd_buy, cmd_sell, cmd_portfolio
 from handlers.news_handlers import cmd_news
 from handlers.ml_handlers import cmd_train, cmd_predict, cmd_accuracy, cmd_sources, cmd_importance
 from handlers.trading_handlers import (cmd_autotrade, cmd_wallet, cmd_trades,
-                                        cmd_performance, cmd_close, cmd_reset)
+                                        cmd_performance, cmd_close, cmd_reset,
+                                        cmd_strategy)
 from handlers.extra_handlers import (cmd_movers, cmd_levels, cmd_calc,
                                       cmd_compare, cmd_dominance, cmd_gas,
                                       cmd_watchlist, cmd_report,
@@ -252,6 +253,24 @@ async def _weekly_report(app: Application):
     except Exception as e:
         logger.error("Self-improver error: %s", e)
 
+    # Run symbol rotation after self-improvement
+    try:
+        from trading.auto_trader import _watched, start_watching
+        from trading.symbol_rotator import run_symbol_rotation
+
+        for chat_id, symbols in _watched.items():
+            new_symbols, rotation_msg = run_symbol_rotation(symbols)
+            if new_symbols != symbols:
+                start_watching(chat_id, list(new_symbols))
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id, text=rotation_msg, parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error("Symbol rotation error: %s", e)
+
 
 def _setup_notify_callback(app: Application):
     from trading.auto_trader import set_notify_callback
@@ -281,8 +300,11 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     _setup_notify_callback(app)
 
-    # Post-init: notify owner, auto-train if models are missing
+    # Post-init: notify owner, start WebSocket feed, auto-train if models missing
     async def _on_startup(application):
+        # Start real-time crypto price feed
+        from trading.ws_price_feed import start_price_feed
+        await start_price_feed()
         import os, threading
         from trading.auto_trader import _watched
         from handlers.ml_handlers import ALL_SYMBOLS
@@ -400,6 +422,8 @@ def main():
     app.add_handler(CommandHandler("perf", cmd_performance))
     app.add_handler(CommandHandler("close", cmd_close))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("strategy", cmd_strategy))
+    app.add_handler(CommandHandler("strat",    cmd_strategy))
 
     # ── Extra Features ────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("movers",    cmd_movers))
@@ -434,10 +458,10 @@ def main():
         interval=ALERT_CHECK_INTERVAL,
         first=15,
     )
-    # Fast position monitor every 2 minutes — SL/TP/trailing stop/smart exit + grid
+    # Fast position monitor every 30 seconds — SL/TP/trailing stop/smart exit + grid
     jq.run_repeating(
         lambda ctx: asyncio.ensure_future(run_position_monitor(app)),
-        interval=120,   # 2 minutes
+        interval=30,    # 30 seconds — catches fast SL/TP triggers
         first=30,
     )
     # DCA cycle every 15 minutes — check if any DCA buy is due
@@ -454,10 +478,11 @@ def main():
     )
     from handlers.extra_handlers import send_daily_report
     import datetime as dt
-    # Daily auto-retraining at 2:00 AM UTC (3 AM Nigeria time)
-    jq.run_daily(
+    # Retraining every 6 hours — keeps models fresh with latest market data
+    jq.run_repeating(
         lambda ctx: asyncio.ensure_future(auto_retrain(app)),
-        time=dt.time(hour=2, minute=0),
+        interval=21600,  # 6 hours
+        first=300,       # first run 5 minutes after startup
     )
     # Daily market report at 8:00 AM UTC
     jq.run_daily(

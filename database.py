@@ -140,6 +140,17 @@ def init_db():
             timeframe   TEXT,
             created_at  TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS strategy_performance (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT    NOT NULL,
+            timeframe   TEXT    NOT NULL,
+            pnl         REAL    NOT NULL,
+            win         INTEGER NOT NULL,
+            recorded_at TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_strat_perf_sym_tf
+            ON strategy_performance(symbol, timeframe);
     """)
 
     # Seed wallet if empty
@@ -216,7 +227,8 @@ def close_position(symbol: str):
 # ── Trade history helpers ─────────────────────────────────────────────────────
 
 def record_trade(symbol, asset_type, entry_price, exit_price, quantity, cost, revenue,
-                 pnl, pnl_pct, result, confidence, signal, opened_at):
+                 pnl, pnl_pct, result, confidence, signal, opened_at, timeframe="1h"):
+    now = datetime.utcnow().isoformat()
     with get_conn() as c:
         c.execute("""
             INSERT INTO trade_history
@@ -224,8 +236,13 @@ def record_trade(symbol, asset_type, entry_price, exit_price, quantity, cost, re
              pnl, pnl_pct, result, confidence, signal, opened_at, closed_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (symbol, asset_type, entry_price, exit_price, quantity, cost, revenue,
-              pnl, pnl_pct, result, confidence, signal, opened_at,
-              datetime.utcnow().isoformat()))
+              pnl, pnl_pct, result, confidence, signal, opened_at, now))
+        # Log per-strategy performance for the /strategy command
+        win = 1 if pnl > 0 else 0
+        c.execute("""
+            INSERT INTO strategy_performance (symbol, timeframe, pnl, win, recorded_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (symbol, timeframe, pnl, win, now))
 
 
 def get_trade_history(limit: int = 20) -> list:
@@ -246,6 +263,25 @@ def get_last_closed_trade(symbol: str) -> sqlite3.Row | None:
 def get_all_closed_trades() -> list:
     with get_conn() as c:
         return c.execute("SELECT * FROM trade_history WHERE exit_price IS NOT NULL").fetchall()
+
+
+def get_strategy_performance(days: int = 30) -> list:
+    """Per-symbol per-timeframe stats for the last N days."""
+    cutoff = (datetime.utcnow().isoformat()[:10])
+    from datetime import timedelta
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_conn() as c:
+        return c.execute("""
+            SELECT symbol, timeframe,
+                   COUNT(*) as trades,
+                   SUM(pnl) as total_pnl,
+                   ROUND(AVG(pnl), 2) as avg_pnl,
+                   ROUND(100.0 * SUM(win) / COUNT(*), 1) as win_rate
+            FROM strategy_performance
+            WHERE recorded_at >= ?
+            GROUP BY symbol, timeframe
+            ORDER BY total_pnl DESC
+        """, (cutoff,)).fetchall()
 
 
 # ── Model registry helpers ────────────────────────────────────────────────────

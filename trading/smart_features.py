@@ -593,3 +593,110 @@ def session_size_mult(symbol: str) -> tuple[float, str]:
 
     # Stocks: only trade during market hours (already gated elsewhere)
     return 1.0, "stock market hours"
+
+
+# ── 14. Trade Quality Scorer ──────────────────────────────────────────────────
+
+_QUALITY_THRESHOLD = 3   # minimum signals that must agree to enter a trade
+
+def trade_quality_score(symbol: str, signal: int, timeframe: str,
+                        regime_ok: bool, engulfing: bool,
+                        ml_confidence: float) -> tuple[int, str]:
+    """
+    Counts how many independent signals agree with the proposed trade direction.
+    Returns (score, detail_string). Trade is only allowed if score >= _QUALITY_THRESHOLD.
+
+    Signals checked (max score = 7):
+      1. ML confidence ≥ 0.65
+      2. Multi-timeframe regime allows buy
+      3. Engulfing candle confirmed
+      4. Positive on-chain composite (crypto only)
+      5. Order book bid-heavy (crypto only)
+      6. RSI not overbought (<70 for buy)
+      7. Volume above average
+    """
+    from config import CRYPTO_IDS
+    import yfinance as yf
+
+    score = 0
+    reasons = []
+
+    # 1. ML confidence
+    if ml_confidence >= 0.65:
+        score += 1
+        reasons.append(f"conf={ml_confidence:.0%}")
+
+    # 2. Regime
+    if regime_ok:
+        score += 1
+        reasons.append("regime✓")
+
+    # 3. Engulfing candle
+    if engulfing:
+        score += 1
+        reasons.append("engulf✓")
+
+    # 4 & 5. On-chain + order book (crypto only)
+    if symbol in CRYPTO_IDS:
+        try:
+            from data.onchain import get_onchain_signals
+            oc = get_onchain_signals(symbol)
+            if oc["composite_signal"] > 0.05:
+                score += 1
+                reasons.append(f"onchain={oc['composite_signal']:+.2f}")
+            if oc["order_book_imbal"] > 0.05:
+                score += 1
+                reasons.append(f"ob={oc['order_book_imbal']:+.2f}")
+        except Exception:
+            pass
+
+    # 6. RSI not overbought
+    try:
+        from config import COMMODITY_SYMBOLS
+        sym = symbol
+        ticker = f"{sym}-USD" if symbol in CRYPTO_IDS else (
+            COMMODITY_SYMBOLS.get(sym, sym + "=X") if symbol in COMMODITY_SYMBOLS else sym
+        )
+        df = yf.Ticker(ticker).history(period="30d", interval="1h")
+        if df is not None and len(df) >= 15:
+            close = df["Close"]
+            delta = close.diff()
+            gain = delta.clip(lower=0).ewm(com=13).mean()
+            loss = (-delta.clip(upper=0)).ewm(com=13).mean()
+            import numpy as np
+            rs = gain / loss.replace(0, np.nan)
+            rsi = 100 - (100 / (1 + rs))
+            last_rsi = float(rsi.iloc[-1])
+            if signal == 1 and last_rsi < 70:
+                score += 1
+                reasons.append(f"rsi={last_rsi:.0f}")
+            elif signal == 0 and last_rsi > 30:
+                score += 1
+                reasons.append(f"rsi={last_rsi:.0f}")
+    except Exception:
+        pass
+
+    # 7. Volume above 20-period average
+    try:
+        if df is not None and len(df) >= 20:
+            vol = df["Volume"]
+            if float(vol.iloc[-1]) > float(vol.rolling(20).mean().iloc[-1]):
+                score += 1
+                reasons.append("vol✓")
+    except Exception:
+        pass
+
+    detail = f"Quality {score}/{_QUALITY_THRESHOLD}: " + ", ".join(reasons) if reasons else f"score={score}"
+    return score, detail
+
+
+def quality_allows_trade(symbol: str, signal: int, timeframe: str,
+                         regime_ok: bool, engulfing: bool,
+                         ml_confidence: float) -> tuple[bool, str]:
+    """Returns (allowed, reason). Convenience wrapper around trade_quality_score."""
+    score, detail = trade_quality_score(
+        symbol, signal, timeframe, regime_ok, engulfing, ml_confidence
+    )
+    if score >= _QUALITY_THRESHOLD:
+        return True, detail
+    return False, f"Quality too low ({score}/{_QUALITY_THRESHOLD}): {detail}"

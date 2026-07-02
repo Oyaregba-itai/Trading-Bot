@@ -93,26 +93,53 @@ def _fetch_yfinance_ohlcv(symbol: str, period: str = "5y") -> pd.DataFrame | Non
 
 
 def _fetch_hourly_ohlcv(symbol: str) -> pd.DataFrame | None:
-    """Fetch 60 days of 1-hour candles for stocks/forex/commodities."""
+    """
+    Fetch up to 2 years of 1-hour candles for stocks/forex/commodities.
+    yfinance supports hourly up to 730 days when using explicit date ranges.
+    Falls back to 60-day period string if date-range fetch fails.
+    """
     import yfinance as yf
+    from datetime import datetime, timedelta
     try:
         from config import COMMODITY_SYMBOLS
         sym = symbol.upper()
         ticker_sym = COMMODITY_SYMBOLS.get(sym, sym)
         if len(sym) == 6 and sym.isalpha() and ticker_sym == sym:
             ticker_sym = sym + "=X"
+
+        end   = datetime.utcnow()
+        start = end - timedelta(days=728)   # ~2 years, yfinance max for 1h
+        df = yf.Ticker(ticker_sym).history(start=start.strftime("%Y-%m-%d"),
+                                           end=end.strftime("%Y-%m-%d"),
+                                           interval="1h")
+        if df is not None and not df.empty and len(df) >= 50:
+            return df[["Open", "High", "Low", "Close", "Volume"]]
+        # Fallback
         df = yf.Ticker(ticker_sym).history(period="60d", interval="1h")
-        if df is None or df.empty or len(df) < 50:
-            return None
-        return df[["Open", "High", "Low", "Close", "Volume"]]
+        if df is not None and not df.empty and len(df) >= 50:
+            return df[["Open", "High", "Low", "Close", "Volume"]]
+        return None
     except Exception:
         return None
 
 
 def _fetch_hourly_crypto(symbol: str) -> pd.DataFrame | None:
-    """Fetch 60 days of 1-hour candles for crypto via yfinance."""
+    """Fetch up to 2 years of 1-hour candles for crypto via yfinance."""
     import yfinance as yf
+    from datetime import datetime, timedelta
     sym = symbol.upper()
+    end   = datetime.utcnow()
+    start = end - timedelta(days=728)
+    for ticker in [f"{sym}-USD", f"{sym}USD=X"]:
+        try:
+            df = yf.Ticker(ticker).history(start=start.strftime("%Y-%m-%d"),
+                                           end=end.strftime("%Y-%m-%d"),
+                                           interval="1h")
+            if df is not None and not df.empty and len(df) >= 50:
+                return df[["Open", "High", "Low", "Close", "Volume"]]
+        except Exception:
+            continue
+    # Fallback to 60d
     for ticker in [f"{sym}-USD", f"{sym}USD=X"]:
         try:
             df = yf.Ticker(ticker).history(period="60d", interval="1h")
