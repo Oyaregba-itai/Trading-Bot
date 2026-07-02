@@ -127,8 +127,8 @@ async def run_position_monitor(app: Application):
 
 async def auto_retrain(app: Application):
     """
-    Daily background retraining job at 2 AM UTC (3 AM Nigeria time).
-    Retrains all 48 models in a background thread and notifies owner when done.
+    Background retraining job — runs on startup + every 6 hours.
+    Retrains all models in a background thread and notifies owner when done.
     """
     import threading
     from trading.auto_trader import _watched, _ensure_default_session
@@ -155,7 +155,7 @@ async def auto_retrain(app: Application):
     def _run():
         logger.info("Auto-retraining %d symbols × 3 timeframes = %d models…", len(ALL_SYMBOLS), total)
         if notify_chats:
-            _notify_chats(f"*Nightly Retraining Started*\n\nRetraining {len(ALL_SYMBOLS)} symbols × 3 timeframes ({total} models) with latest market data.\nThis takes ~30 minutes — you'll get a summary when done.")
+            _notify_chats(f"*Retraining Started*\n\nRetraining {len(ALL_SYMBOLS)} symbols × 3 timeframes ({total} models) with 2yr of data.\nThis takes ~30 min — you'll get a summary when done.")
         results = []
         for sym in ALL_SYMBOLS:
             for tf in TIMEFRAMES:
@@ -169,7 +169,7 @@ async def auto_retrain(app: Application):
         err = [r for r in results if "error" in r]
 
         summary = (
-            f"*Nightly Retraining Complete*\n\n"
+            f"*Retraining Complete*\n\n"
             f"✅ {len(ok)}/{total} models updated (5m + 1h + 1d)\n"
             + (f"\n❌ {len(err)} failed" if err else "All timeframes ready.")
         )
@@ -300,73 +300,34 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     _setup_notify_callback(app)
 
-    # Post-init: notify owner, start WebSocket feed, auto-train if models missing
+    # Post-init: notify owner, start WebSocket feed, full retrain in background
     async def _on_startup(application):
-        # Start real-time crypto price feed
+        import os
         from trading.ws_price_feed import start_price_feed
-        await start_price_feed()
-        import os, threading
         from trading.auto_trader import _watched
-        from handlers.ml_handlers import ALL_SYMBOLS
-        from database import get_all_models
+
+        # Start real-time crypto price feed
+        await start_price_feed()
 
         chat_id = int(os.environ.get("DEFAULT_CHAT_ID", "0"))
-
-        # Check which symbol+timeframe combos are missing
-        TIMEFRAMES = ["5m", "1h", "1d"]
-        trained = {r["symbol"] for r in (get_all_models() or [])}
-        missing_combos = [
-            (sym, tf) for sym in ALL_SYMBOLS for tf in TIMEFRAMES
-            if f"{sym}_{tf}" not in trained
-        ]
-
         if chat_id and _watched:
             sym_count = sum(len(v) for v in _watched.values())
             try:
-                status = "Auto-trading ON — all 3 timeframes ready."
-                if missing_combos:
-                    n_sym = len({s for s, _ in missing_combos})
-                    status = (f"Models missing ({len(missing_combos)} combos across {n_sym} symbols) "
-                              f"— auto-training 5m/1h/1d in background. Trading starts after training.")
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"Bot restarted and is ACTIVE\nWatching {sym_count} symbols. {status}"
+                    text=(
+                        f"Bot restarted — ACTIVE\n"
+                        f"Watching {sym_count} symbols.\n\n"
+                        f"Full model retrain starting in background (2yr data). "
+                        f"Trading begins immediately with any existing models; "
+                        f"updated models replace them as they finish."
+                    )
                 )
             except Exception:
                 pass
 
-        # If any timeframe models are missing, auto-train in background
-        if missing_combos:
-            async def _bg_train():
-                from ml.trainer import train_symbol
-                import concurrent.futures
-                loop = asyncio.get_running_loop()
-                ok, err = [], []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    for sym, tf in missing_combos:
-                        try:
-                            r = await loop.run_in_executor(
-                                pool, lambda s=sym, t=tf: train_symbol(s, timeframe=t)
-                            )
-                            ok.append(r)
-                        except Exception as e:
-                            err.append(f"{sym}/{tf}")
-                            logger.error("Startup train failed %s/%s: %s", sym, tf, e)
-                total_syms = len({r.get("symbol","?") for r in ok})
-                summary = (
-                    f"Auto-Training Complete\n\n"
-                    f"{len(ok)}/{len(missing_combos)} models trained "
-                    f"(5m + 1h + 1d across {total_syms} symbols)\n"
-                    + (f"Failed: {', '.join(err)}" if err else "All timeframes ready.")
-                    + "\n\nAuto-trading is now fully active with multi-timeframe confluence."
-                )
-                if chat_id:
-                    try:
-                        await application.bot.send_message(chat_id=chat_id, text=summary)
-                    except Exception:
-                        pass
-
-            asyncio.ensure_future(_bg_train())
+        # Full retrain on startup — same job as the 6h cycle
+        asyncio.ensure_future(auto_retrain(application))
 
     app.post_init = _on_startup
 
