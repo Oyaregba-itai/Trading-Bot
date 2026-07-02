@@ -14,7 +14,8 @@ import database as db
 
 logger = logging.getLogger(__name__)
 
-MIN_CONFIDENCE  = 0.60    # Only trade if model confidence ≥ 60%
+MIN_CONFIDENCE  = 0.65    # Only trade if model confidence ≥ 65%
+MIN_RR_RATIO    = 2.0     # Minimum take-profit / stop-loss ratio (2:1)
 MIN_CASH_RESERVE = 500.0  # Always keep $500 in cash
 
 
@@ -248,6 +249,12 @@ def execute_buy(symbol: str, asset_type: str, current_price: float,
     params    = _trade_params(symbol, sentiment, confidence, equity, timeframe)
     available = cash - MIN_CASH_RESERVE
     if available < 10:
+        return None
+
+    # Enforce minimum 2:1 risk/reward — skip trades where SL is too close to TP
+    rr_ratio = params["tp_pct"] / params["sl_pct"] if params["sl_pct"] > 0 else 0
+    if rr_ratio < MIN_RR_RATIO:
+        logger.info("Skipping %s — R/R %.1f:1 below minimum %.1f:1", symbol, rr_ratio, MIN_RR_RATIO)
         return None
 
     # Apply filter size multiplier on top of sentiment/confidence sizing

@@ -125,6 +125,56 @@ def build_feature_matrix(df: pd.DataFrame, sentiment_score: float = 0.0,
     vol_long  = close.pct_change().rolling(30).std()
     df["vol_regime"] = (vol_short / (vol_long + 1e-10)).fillna(1.0).clip(0, 5)
 
+    # ── VWAP (Volume Weighted Average Price) ──────────────────────────────────
+    # Key institutional reference level — price above VWAP = bullish bias
+    typical_price = (high + low + close) / 3
+    vol_safe = volume.replace(0, 1)
+    vwap = (typical_price * vol_safe).rolling(20).sum() / vol_safe.rolling(20).sum()
+    df["price_vs_vwap"] = ((close / vwap) - 1).fillna(0)
+    df["vwap_slope"] = vwap.pct_change(3).fillna(0)
+
+    # ── ADX (Average Directional Index — trend strength 0-100) ────────────────
+    up_move   = high.diff()
+    down_move = -low.diff()
+    plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm  = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr2 = pd.concat([high - low, (high - close.shift()).abs(),
+                     (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr14 = tr2.rolling(14).mean().replace(0, 1e-9)
+    pdi   = 100 * pd.Series(plus_dm).rolling(14).mean() / atr14
+    mdi   = 100 * pd.Series(minus_dm).rolling(14).mean() / atr14
+    pdi.index = df.index
+    mdi.index = df.index
+    dx    = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, 1e-9)
+    adx   = dx.rolling(14).mean()
+    df["adx"]      = (adx / 100).fillna(0.2)   # normalised 0-1
+    df["adx_trend"] = (pdi - mdi).fillna(0) / 100   # positive = bullish, negative = bearish
+
+    # ── Williams %R (overbought/oversold -100 to 0) ───────────────────────────
+    h14 = high.rolling(14).max()
+    l14 = low.rolling(14).min()
+    df["williams_r"] = ((h14 - close) / (h14 - l14 + 1e-10) * -100).fillna(-50) / 100
+
+    # ── CCI (Commodity Channel Index) ─────────────────────────────────────────
+    mean_deviation = (typical_price - typical_price.rolling(20).mean()).abs().rolling(20).mean()
+    cci = (typical_price - typical_price.rolling(20).mean()) / (0.015 * mean_deviation + 1e-10)
+    df["cci_norm"] = cci.clip(-300, 300) / 300   # normalised -1..+1
+
+    # ── Volume delta (buying pressure vs selling pressure) ────────────────────
+    # Up candles: volume attributed to buyers; Down candles: to sellers
+    candle_dir = np.sign(close - df["Open"])
+    df["vol_delta"] = (vol_safe * candle_dir).rolling(10).sum() / (vol_safe.rolling(10).sum() + 1e-9)
+    df["vol_delta"] = df["vol_delta"].fillna(0)
+
+    # ── Price velocity (rate of change of momentum) ───────────────────────────
+    df["rsi_velocity"]  = _rsi_series(close, 14).diff(3).fillna(0)
+    df["price_accel"]   = close.pct_change(1).diff(3).fillna(0)
+
+    # ── Support / Resistance proximity ────────────────────────────────────────
+    # How far is price from its 52-week high/low? (proxy for key S/R levels)
+    df["dist_52w_high"] = (close / close.rolling(min(252, len(close))).max() - 1).fillna(0)
+    df["dist_52w_low"]  = (close / close.rolling(min(252, len(close))).min() - 1).fillna(0)
+
     # ── External signals ──────────────────────────────────────────────────────
     df["sentiment"]  = sentiment_score
     df["fear_greed"] = (fear_greed - 50) / 50
@@ -154,6 +204,18 @@ def build_feature_matrix(df: pd.DataFrame, sentiment_score: float = 0.0,
         "day_of_week", "month",
         # External
         "sentiment", "fear_greed",
+        # VWAP
+        "price_vs_vwap", "vwap_slope",
+        # ADX
+        "adx", "adx_trend",
+        # Oscillators
+        "williams_r", "cci_norm",
+        # Volume delta
+        "vol_delta",
+        # Velocity
+        "rsi_velocity", "price_accel",
+        # S/R proximity
+        "dist_52w_high", "dist_52w_low",
     ]
 
     return df[feature_cols]

@@ -66,6 +66,22 @@ def _build_et(class_weight="balanced"):
     )
 
 
+def _build_mlp():
+    from sklearn.neural_network import MLPClassifier
+    return MLPClassifier(
+        hidden_layer_sizes=(128, 64, 32),
+        activation="relu",
+        solver="adam",
+        learning_rate="adaptive",
+        learning_rate_init=0.001,
+        max_iter=500,
+        early_stopping=True,
+        validation_fraction=0.15,
+        n_iter_no_change=20,
+        random_state=42,
+    )
+
+
 class TradingModel:
     def __init__(self, symbol: str, timeframe: str = "1h"):
         self.symbol    = symbol.upper()
@@ -89,20 +105,26 @@ class TradingModel:
         tscv = TimeSeriesSplit(n_splits=n_splits)
 
         # Build ensemble (soft voting = use probabilities, more stable)
+        # MLP gets lower weight — it's a different signal type, not a tiebreaker
         try:
             ensemble = VotingClassifier(
                 estimators=[
                     ("xgb", _build_xgb(spw)),
                     ("rf",  _build_rf()),
                     ("et",  _build_et()),
+                    ("mlp", _build_mlp()),
                 ],
                 voting="soft",
+                weights=[2, 1, 1, 1],   # XGBoost gets 2x weight (most reliable for tabular)
                 n_jobs=1,
             )
         except Exception:
-            # XGBoost not available — use RF + ET only
             ensemble = VotingClassifier(
-                estimators=[("rf", _build_rf()), ("et", _build_et())],
+                estimators=[
+                    ("rf",  _build_rf()),
+                    ("et",  _build_et()),
+                    ("mlp", _build_mlp()),
+                ],
                 voting="soft",
                 n_jobs=1,
             )

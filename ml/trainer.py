@@ -192,6 +192,51 @@ def fetch_training_data(symbol: str, timeframe: str = "1h", days: int = 500) -> 
     return _fetch_yfinance_ohlcv(sym, "5y")
 
 
+# ── P&L-aware label builder (RL-inspired) ────────────────────────────────────
+
+def build_pnl_labels(df: pd.DataFrame, sl_pct: float, tp_pct: float,
+                     timeframe: str = "1h") -> pd.Series:
+    """
+    Labels based on whether a trade opened at each candle would hit TP or SL first.
+    This directly mirrors the bot's actual trading logic, unlike horizon-based labels.
+
+      label = 1 (BUY)  → TP hit before SL within lookahead window
+      label = 0 (SELL) → SL hit before TP
+      label = NaN      → neither hit (HOLD — dropped during training)
+
+    lookahead candles per timeframe:
+      5m → 48 candles (4 hours)
+      1h → 48 candles (2 days)
+      1d → 10 candles (2 weeks)
+    """
+    lookahead = {"5m": 48, "1h": 48, "1d": 10}.get(timeframe, 48)
+
+    close_arr = df["Close"].values
+    high_arr  = df["High"].values
+    low_arr   = df["Low"].values
+    n = len(df)
+
+    labels = np.full(n, np.nan)
+
+    for i in range(n - 1):
+        entry = close_arr[i]
+        if entry <= 0:
+            continue
+        tp_price = entry * (1 + tp_pct)
+        sl_price = entry * (1 - sl_pct)
+
+        end = min(i + 1 + lookahead, n)
+        for j in range(i + 1, end):
+            if high_arr[j] >= tp_price:
+                labels[i] = 1.0   # TP hit first → good BUY
+                break
+            if low_arr[j] <= sl_price:
+                labels[i] = 0.0   # SL hit first → bad trade
+                break
+
+    return pd.Series(labels, index=df.index)
+
+
 # ── Main training function ────────────────────────────────────────────────────
 
 def train_symbol(symbol: str, days: int = 500,
@@ -238,7 +283,21 @@ def train_symbol(symbol: str, days: int = 500,
 
     # Build features
     features = build_feature_matrix(df, sentiment_score=0.0, fear_greed=50)
-    labels = build_labels(df, horizon_days=horizon_days, threshold=effective_threshold)
+
+    # Use P&L-aware labels when we have enough data (RL-inspired: directly optimises for profit)
+    # Fall back to horizon labels for short datasets where lookahead would eat too many rows
+    lookahead = {"5m": 48, "1h": 48, "1d": 10}.get(timeframe, 48)
+    use_pnl_labels = len(df) >= (lookahead * 3)
+
+    if use_pnl_labels:
+        # Default SL/TP used for labeling — 2:1 R/R ratio
+        label_sl = {"5m": 0.003, "1h": 0.015, "1d": 0.04}.get(timeframe, 0.015)
+        label_tp = label_sl * 2.0
+        labels = build_pnl_labels(df, sl_pct=label_sl, tp_pct=label_tp, timeframe=timeframe)
+        emit(f"Using P&L-aware labels (SL={label_sl*100:.1f}%, TP={label_tp*100:.1f}%)")
+    else:
+        labels = build_labels(df, horizon_days=horizon_days, threshold=effective_threshold)
+        emit(f"Using horizon labels (dataset too small for P&L labels)")
 
     # Align and drop NaN / HOLD rows
     combined = features.join(labels.rename("label"))
